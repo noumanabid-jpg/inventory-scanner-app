@@ -36,8 +36,7 @@ import { Separator } from "@/components/ui/separator";
    Helpers & Column Mapping
    ============================ */
 const toNumber = (v) => {
-  const n =
-    typeof v === "number" ? v : parseFloat(String(v ?? "").replace(/[\s,]/g, ""));
+  const n = typeof v === "number" ? v : parseFloat(String(v ?? "").replace(/[\s,]/g, ""));
   return Number.isFinite(n) ? n : 0;
 };
 
@@ -67,19 +66,27 @@ function useColumns(rows) {
    Netlify Functions helpers
    ============================ */
 async function nfList(ns) {
-  const res = await fetch(
-    `/.netlify/functions/blob-list?ns=${encodeURIComponent(ns)}`
-  );
+  const res = await fetch(`/.netlify/functions/blob-list?ns=${encodeURIComponent(ns)}`);
   if (!res.ok) throw new Error(`List failed: ${res.status}`);
   return res.json();
 }
 
+// Convert ArrayBuffer -> base64 safely (chunked; avoids call stack overflow)
+function bufferToBase64(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  const chunkSize = 0x8000; // 32KB chunks
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode.apply(null, chunk);
+  }
+  return btoa(binary);
+}
+
 async function nfUpload(ns, file) {
-  const url = `/.netlify/functions/blob-upload?ns=${encodeURIComponent(
-    ns
-  )}&name=${encodeURIComponent(file.name)}`;
+  const url = `/.netlify/functions/blob-upload?ns=${encodeURIComponent(ns)}&name=${encodeURIComponent(file.name)}`;
   const buf = await file.arrayBuffer();
-  const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+  const b64 = bufferToBase64(buf); // safe for large files
   const res = await fetch(url, {
     method: "POST",
     body: b64,
@@ -90,9 +97,7 @@ async function nfUpload(ns, file) {
 }
 
 async function nfDownload(key) {
-  const res = await fetch(
-    `/.netlify/functions/blob-download?key=${encodeURIComponent(key)}`
-  );
+  const res = await fetch(`/.netlify/functions/blob-download?key=${encodeURIComponent(key)}`);
   if (!res.ok) throw new Error(`Download failed: ${res.status}`);
   const b64 = await res.text();
   const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
@@ -100,22 +105,17 @@ async function nfDownload(key) {
 }
 
 async function nfPutJSON(key, data) {
-  const res = await fetch(
-    `/.netlify/functions/blob-put-json?key=${encodeURIComponent(key)}`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(data ?? {}),
-    }
-  );
+  const res = await fetch(`/.netlify/functions/blob-put-json?key=${encodeURIComponent(key)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(data ?? {}),
+  });
   if (!res.ok) throw new Error(`Save JSON failed: ${res.status}`);
   return res.json();
 }
 
 async function nfGetJSON(key) {
-  const res = await fetch(
-    `/.netlify/functions/blob-get-json?key=${encodeURIComponent(key)}`
-  );
+  const res = await fetch(`/.netlify/functions/blob-get-json?key=${encodeURIComponent(key)}`);
   if (!res.ok) throw new Error(`Get JSON failed: ${res.status}`);
   return res.json();
 }
@@ -197,10 +197,7 @@ export default function InventoryScannerApp() {
   };
 
   const scansKeyFor = (fileKey) => {
-    const base = (fileKey || "")
-      .split("/")
-      .pop()
-      ?.replace(/\.[^.]+$/, "") || "file";
+    const base = (fileKey || "").split("/").pop()?.replace(/\.[^.]+$/, "") || "file";
     const prefix = (fileKey || "").split("/").slice(0, -1).join("/");
     return `${prefix}/scans/${base}.json`;
   };
@@ -405,17 +402,11 @@ export default function InventoryScannerApp() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {saving && (
-              <span className="text-xs text-gray-500 mr-2">Saving…</span>
-            )}
+            {saving && <span className="text-xs text-gray-500 mr-2">Saving…</span>}
             <Button variant="outline" onClick={clearAll} className="gap-2">
               <RefreshCw className="h-4 w-4" /> Reset
             </Button>
-            <Button
-              onClick={exportDifferencesCSV}
-              className="gap-2"
-              disabled={!diffs.length}
-            >
+            <Button onClick={exportDifferencesCSV} className="gap-2" disabled={!diffs.length}>
               <Download className="h-4 w-4" /> Diff CSV
             </Button>
             <Button
@@ -447,18 +438,12 @@ export default function InventoryScannerApp() {
                     placeholder="e.g., jeddah-warehouse"
                   />
                   <div className="flex gap-2">
-                    <Button
-                      variant="outline"
-                      onClick={refreshCloudList}
-                      disabled={cloudBusy}
-                    >
+                    <Button variant="outline" onClick={refreshCloudList} disabled={cloudBusy}>
                       Refresh
                     </Button>
                     <Button
                       variant="secondary"
-                      onClick={() =>
-                        document.getElementById("hiddenUpload").click()
-                      }
+                      onClick={() => document.getElementById("hiddenUpload").click()}
                       disabled={cloudBusy}
                     >
                       Upload to Cloud
@@ -468,9 +453,7 @@ export default function InventoryScannerApp() {
                       type="file"
                       accept=".csv"
                       className="hidden"
-                      onChange={(e) =>
-                        handleCloudUploadThenLoad(e.target.files?.[0])
-                      }
+                      onChange={(e) => handleCloudUploadThenLoad(e.target.files?.[0])}
                     />
                   </div>
                 </div>
@@ -485,9 +468,7 @@ export default function InventoryScannerApp() {
                     {cloudFiles.map((f) => (
                       <option key={f.key} value={f.key}>
                         {f.key.split("/").pop()} —{" "}
-                        {f.uploadedAt
-                          ? new Date(f.uploadedAt).toLocaleString()
-                          : "-"}
+                        {f.uploadedAt ? new Date(f.uploadedAt).toLocaleString() : "-"}
                       </option>
                     ))}
                   </select>
@@ -533,8 +514,7 @@ export default function InventoryScannerApp() {
                 )}
                 {notFound && (
                   <p className="text-sm text-amber-700">
-                    Barcode <span className="font-semibold">{notFound}</span> not
-                    found in the file.
+                    Barcode <span className="font-semibold">{notFound}</span> not found in the file.
                   </p>
                 )}
               </div>
@@ -558,9 +538,7 @@ export default function InventoryScannerApp() {
               </div>
               <div className="flex items-center justify-between">
                 <span>With differences</span>
-                <span className="font-medium">
-                  {diffs.filter((d) => d.delta !== 0).length}
-                </span>
+                <span className="font-medium">{diffs.filter((d) => d.delta !== 0).length}</span>
               </div>
             </CardContent>
           </Card>
@@ -583,19 +561,14 @@ export default function InventoryScannerApp() {
               <tbody>
                 {diffs.length === 0 && (
                   <tr>
-                    <td
-                      colSpan={6}
-                      className="px-3 py-6 text-center text-gray-500"
-                    >
+                    <td colSpan={6} className="px-3 py-6 text-center text-gray-500">
                       No scans yet.
                     </td>
                   </tr>
                 )}
                 {diffs.map((d) => (
                   <tr key={d.barcode} className="border-t">
-                    <td className="px-3 py-2">
-                      {new Date(d.ts).toLocaleString()}
-                    </td>
+                    <td className="px-3 py-2">{new Date(d.ts).toLocaleString()}</td>
                     <td className="px-3 py-2 font-mono">{d.barcode}</td>
                     <td className="px-3 py-2">{d.name}</td>
                     <td className="px-3 py-2 text-right">{d.prevOnHand}</td>
@@ -628,8 +601,7 @@ export default function InventoryScannerApp() {
                 <DialogTitle className="text-2xl">{active.name}</DialogTitle>
                 <DialogDescription>
                   <div className="text-base">
-                    Barcode:{" "}
-                    <span className="font-mono font-medium">{active.barcode}</span>
+                    Barcode: <span className="font-mono font-medium">{active.barcode}</span>
                   </div>
                 </DialogDescription>
               </DialogHeader>
@@ -653,17 +625,12 @@ export default function InventoryScannerApp() {
                     className="text-lg"
                   />
                   <p className="text-xs text-gray-500 mt-1">
-                    Press <strong>Enter</strong> to save, <strong>Esc</strong> to
-                    cancel.
+                    Press <strong>Enter</strong> to save, <strong>Esc</strong> to cancel.
                   </p>
                 </div>
               </div>
               <DialogFooter className="flex items-center justify-between gap-2">
-                <Button
-                  variant="outline"
-                  className="gap-2"
-                  onClick={() => setActive(null)}
-                >
+                <Button variant="outline" className="gap-2" onClick={() => setActive(null)}>
                   <X className="h-4 w-4" /> Cancel
                 </Button>
                 <div className="flex gap-2">
@@ -691,12 +658,8 @@ function StatBox({ label, value, large, muted }) {
   return (
     <Card className={`border-2 ${muted ? "border-gray-200" : "border-gray-300"}`}>
       <CardContent className="p-4">
-        <div className="text-xs uppercase tracking-wide text-gray-500">
-          {label}
-        </div>
-        <div className={`${large ? "text-3xl" : "text-xl"} font-semibold`}>
-          {value}
-        </div>
+        <div className="text-xs uppercase tracking-wide text-gray-500">{label}</div>
+        <div className={`${large ? "text-3xl" : "text-xl"} font-semibold`}>{value}</div>
       </CardContent>
     </Card>
   );
