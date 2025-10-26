@@ -1,0 +1,8 @@
+[functions]
+  node_bundler = "esbuild"
+  directory = "netlify/functions"
+  included_files = []
+
+[build]
+  command = "npm run build"
+  publish = "dist"
