@@ -1,11 +1,26 @@
-
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Papa from "papaparse";
-import { Upload, Barcode as BarcodeIcon, Download, Check, X, AlertTriangle, FileSpreadsheet, RefreshCw } from "lucide-react";
+import {
+  Upload,
+  Barcode as BarcodeIcon,
+  Download,
+  Check,
+  X,
+  AlertTriangle,
+  FileSpreadsheet,
+  RefreshCw,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
@@ -14,11 +29,15 @@ import { Separator } from "@/components/ui/separator";
  * Cloud-only Inventory Scanner
  * - All CSVs live in Netlify Blobs (by namespace).
  * - Choose a cloud CSV to work with; when selected, we also load its related scans JSON.
- * - Confirming counts auto-saves scans JSON for that CSV.
+ * - Confirming counts auto-saves scans JSON for that CSV (debounced, no recursion).
  */
 
+/* ============================
+   Helpers & Column Mapping
+   ============================ */
 const toNumber = (v) => {
-  const n = typeof v === "number" ? v : parseFloat(String(v ?? "").replace(/[\s,]/g, ""));
+  const n =
+    typeof v === "number" ? v : parseFloat(String(v ?? "").replace(/[\s,]/g, ""));
   return Number.isFinite(n) ? n : 0;
 };
 
@@ -35,6 +54,7 @@ function mapColumns(headers) {
   if (!cols.barcode || !cols.name || !cols.onHand) return null;
   return cols;
 }
+
 function useColumns(rows) {
   return useMemo(() => {
     if (!rows?.length) return null;
@@ -43,51 +63,80 @@ function useColumns(rows) {
   }, [rows]);
 }
 
-// Netlify Functions helpers
+/* ============================
+   Netlify Functions helpers
+   ============================ */
 async function nfList(ns) {
-  const res = await fetch(`/.netlify/functions/blob-list?ns=${encodeURIComponent(ns)}`);
+  const res = await fetch(
+    `/.netlify/functions/blob-list?ns=${encodeURIComponent(ns)}`
+  );
   if (!res.ok) throw new Error(`List failed: ${res.status}`);
   return res.json();
 }
+
 async function nfUpload(ns, file) {
-  const url = `/.netlify/functions/blob-upload?ns=${encodeURIComponent(ns)}&name=${encodeURIComponent(file.name)}`;
+  const url = `/.netlify/functions/blob-upload?ns=${encodeURIComponent(
+    ns
+  )}&name=${encodeURIComponent(file.name)}`;
   const buf = await file.arrayBuffer();
   const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
-  const res = await fetch(url, { method: "POST", body: b64, headers: { "content-type": "application/octet-stream" } });
+  const res = await fetch(url, {
+    method: "POST",
+    body: b64,
+    headers: { "content-type": "application/octet-stream" },
+  });
   if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
   return res.json();
 }
+
 async function nfDownload(key) {
-  const res = await fetch(`/.netlify/functions/blob-download?key=${encodeURIComponent(key)}`);
+  const res = await fetch(
+    `/.netlify/functions/blob-download?key=${encodeURIComponent(key)}`
+  );
   if (!res.ok) throw new Error(`Download failed: ${res.status}`);
   const b64 = await res.text();
   const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
   return new Blob([bytes], { type: "text/csv" });
 }
+
 async function nfPutJSON(key, data) {
-  const res = await fetch(`/.netlify/functions/blob-put-json?key=${encodeURIComponent(key)}`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(data ?? {}),
-  });
+  const res = await fetch(
+    `/.netlify/functions/blob-put-json?key=${encodeURIComponent(key)}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(data ?? {}),
+    }
+  );
   if (!res.ok) throw new Error(`Save JSON failed: ${res.status}`);
   return res.json();
 }
+
 async function nfGetJSON(key) {
-  const res = await fetch(`/.netlify/functions/blob-get-json?key=${encodeURIComponent(key)}`);
+  const res = await fetch(
+    `/.netlify/functions/blob-get-json?key=${encodeURIComponent(key)}`
+  );
   if (!res.ok) throw new Error(`Get JSON failed: ${res.status}`);
   return res.json();
 }
 
+/* ============================
+   Main Component
+   ============================ */
 export default function InventoryScannerApp() {
+  // Cloud / files
   const [namespace, setNamespace] = useState("default");
   const [cloudFiles, setCloudFiles] = useState([]); // {key,size,uploadedAt}
   const [cloudBusy, setCloudBusy] = useState(false);
-  const [activeKey, setActiveKey] = useState("");
+  const [activeKey, setActiveKey] = useState(""); // currently selected CSV key
 
+  // Data
   const [rows, setRows] = useState([]);
   const [fileName, setFileName] = useState("");
   const [error, setError] = useState("");
   const cols = useColumns(rows);
 
+  // Fast lookup by Barcode
   const index = useMemo(() => {
     if (!cols) return new Map();
     const m = new Map();
@@ -98,20 +147,31 @@ export default function InventoryScannerApp() {
     return m;
   }, [rows, cols]);
 
+  // Scans & UI state
   const [diffs, setDiffs] = useState([]); // persisted per-file
-  const [active, setActive] = useState(null);
+  const [active, setActive] = useState(null); // currently scanned item
   const [actualQty, setActualQty] = useState("");
   const [notFound, setNotFound] = useState("");
   const [saving, setSaving] = useState(false);
   const barcodeRef = useRef(null);
 
-  useEffect(() => { const t = setTimeout(() => barcodeRef.current?.focus(), 200); return () => clearTimeout(t); }, [rows.length]);
+  // Tracks last successfully-saved payload to avoid redundant saves
+  const lastSavedRef = useRef("");
+
+  useEffect(() => {
+    const t = setTimeout(() => barcodeRef.current?.focus(), 200);
+    return () => clearTimeout(t);
+  }, [rows.length]);
 
   const refreshCloudList = async () => {
     setCloudBusy(true);
     try {
       const out = await nfList(namespace);
-      setCloudFiles((out.files || []).sort((a,b)=> (b.uploadedAt||"").localeCompare(a.uploadedAt||"")));
+      setCloudFiles(
+        (out.files || []).sort((a, b) =>
+          (b.uploadedAt || "").localeCompare(a.uploadedAt || "")
+        )
+      );
     } catch (e) {
       setError(e.message || "Failed to list");
     } finally {
@@ -137,7 +197,10 @@ export default function InventoryScannerApp() {
   };
 
   const scansKeyFor = (fileKey) => {
-    const base = (fileKey || "").split("/").pop()?.replace(/\.[^.]+$/, "") || "file";
+    const base = (fileKey || "")
+      .split("/")
+      .pop()
+      ?.replace(/\.[^.]+$/, "") || "file";
     const prefix = (fileKey || "").split("/").slice(0, -1).join("/");
     return `${prefix}/scans/${base}.json`;
   };
@@ -153,7 +216,7 @@ export default function InventoryScannerApp() {
         complete: (res) => {
           setRows(res.data || []);
           setFileName(key.split("/").pop());
-          setDiffs([]);
+          setDiffs([]); // will be replaced by loadScansForActive
           setNotFound("");
         },
         error: (err) => setError(err?.message || "Failed to parse CSV"),
@@ -169,24 +232,19 @@ export default function InventoryScannerApp() {
     try {
       const key = scansKeyFor(fileKey);
       const res = await nfGetJSON(key);
-      if (res && Array.isArray(res.diffs)) setDiffs(res.diffs);
-      else if (res && res.data && Array.isArray(res.data.diffs)) setDiffs(res.data.diffs);
-      else setDiffs([]);
+      if (res && Array.isArray(res.diffs)) {
+        setDiffs(res.diffs);
+        lastSavedRef.current = JSON.stringify({ diffs: res.diffs });
+      } else if (res && res.data && Array.isArray(res.data.diffs)) {
+        setDiffs(res.data.diffs);
+        lastSavedRef.current = JSON.stringify({ diffs: res.data.diffs });
+      } else {
+        setDiffs([]);
+        lastSavedRef.current = JSON.stringify({ diffs: [] });
+      }
     } catch {
       setDiffs([]);
-    }
-  };
-
-  const saveScansForActive = async () => {
-    if (!activeKey) return;
-    try {
-      setSaving(true);
-      const key = scansKeyFor(activeKey);
-      await nfPutJSON(key, { diffs });
-    } catch (e) {
-      console.warn("Save scans failed:", e);
-    } finally {
-      setSaving(false);
+      lastSavedRef.current = JSON.stringify({ diffs: [] });
     }
   };
 
@@ -197,23 +255,56 @@ export default function InventoryScannerApp() {
     barcodeRef.current?.focus();
   };
 
-  // Auto-save diffs on change (debounced)
+  /* ============================
+     Debounced auto-save of scans
+     (no recursion, skip unchanged)
+     ============================ */
   useEffect(() => {
     if (!activeKey) return;
-    const t = setTimeout(() => { saveScansForActive(); }, 400);
-    return () => clearTimeout(t);
-  }, [JSON.stringify(diffs), activeKey]);
 
+    const payload = JSON.stringify({ diffs });
+    if (payload === lastSavedRef.current) return; // nothing changed since last save
+
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      if (cancelled) return;
+      try {
+        setSaving(true); // keeps the "Saving…" indicator
+        await nfPutJSON(scansKeyFor(activeKey), { diffs });
+        lastSavedRef.current = payload;
+      } catch (e) {
+        console.warn("Save JSON failed:", e);
+      } finally {
+        setSaving(false);
+      }
+    }, 800); // debounce delay
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [activeKey, diffs]);
+
+  /* ============================
+     Scanning & actions
+     ============================ */
   const onBarcodeScan = (e) => {
     if (e.key !== "Enter") return;
     const code = e.currentTarget.value.trim();
     if (!code) return;
-    if (!cols) { setError("Missing required columns: Barcode, Name, and On Hand."); return; }
+    if (!cols) {
+      setError("Missing required columns: Barcode, Name, and On Hand.");
+      return;
+    }
 
     const r = index.get(code);
     if (!r) {
-      setActive(null); setNotFound(code); e.currentTarget.select(); return;
+      setActive(null);
+      setNotFound(code);
+      e.currentTarget.select();
+      return;
     }
+
     const item = {
       barcode: String(r[cols.barcode] ?? "").trim(),
       name: String(r[cols.name] ?? "").trim(),
@@ -254,21 +345,26 @@ export default function InventoryScannerApp() {
   };
 
   const exportDifferencesCSV = () => {
-    const data = diffs.filter((d) => d.delta !== 0).map((d) => ({
-      Barcode: d.barcode,
-      Name: d.name,
-      "Prev On Hand": d.prevOnHand,
-      Reserved: d.reserved,
-      "Actual On Hand": d.actual,
-      Delta: d.delta,
-      Timestamp: d.ts,
-    }));
+    const data = diffs
+      .filter((d) => d.delta !== 0)
+      .map((d) => ({
+        Barcode: d.barcode,
+        Name: d.name,
+        "Prev On Hand": d.prevOnHand,
+        Reserved: d.reserved,
+        "Actual On Hand": d.actual,
+        Delta: d.delta,
+        Timestamp: d.ts,
+      }));
     const csv = Papa.unparse(data);
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url;
+    const a = document.createElement("a");
+    a.href = url;
     const stem = fileName?.replace(/\.[^.]+$/, "") || "inventory";
-    a.download = `${stem}_differences.csv`; a.click(); URL.revokeObjectURL(url);
+    a.download = `${stem}_differences.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const exportAllScansCSV = () => {
@@ -284,77 +380,188 @@ export default function InventoryScannerApp() {
     const csv = Papa.unparse(data);
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url;
+    const a = document.createElement("a");
+    a.href = url;
     const stem = fileName?.replace(/\.[^.]+$/, "") || "inventory";
-    a.download = `${stem}_all_scans.csv`; a.click(); URL.revokeObjectURL(url);
+    a.download = `${stem}_all_scans.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
+  /* ============================
+     UI
+     ============================ */
   return (
     <div className="min-h-screen w-full bg-gray-50 p-4 md:p-8">
       <div className="mx-auto max-w-6xl space-y-6">
         <header className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
           <div>
-            <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">Inventory Barcode Scanner</h1>
+            <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">
+              Inventory Barcode Scanner
+            </h1>
             <p className="text-sm text-gray-600">
-              Choose a <strong>cloud CSV</strong>, scan the <strong>Barcode</strong>, confirm or adjust quantities, and export a difference report.
+              Choose a <strong>cloud CSV</strong>, scan the <strong>Barcode</strong>, confirm or adjust
+              quantities, and export a difference report.
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {saving && <span className="text-xs text-gray-500 mr-2">Saving…</span>}
-            <Button variant="outline" onClick={clearAll} className="gap-2"><RefreshCw className="h-4 w-4" /> Reset</Button>
-            <Button onClick={exportDifferencesCSV} className="gap-2" disabled={!diffs.length}><Download className="h-4 w-4" /> Diff CSV</Button>
-            <Button variant="secondary" onClick={exportAllScansCSV} className="gap-2" disabled={!diffs.length}><FileSpreadsheet className="h-4 w-4" /> All Scans</Button>
+            {saving && (
+              <span className="text-xs text-gray-500 mr-2">Saving…</span>
+            )}
+            <Button variant="outline" onClick={clearAll} className="gap-2">
+              <RefreshCw className="h-4 w-4" /> Reset
+            </Button>
+            <Button
+              onClick={exportDifferencesCSV}
+              className="gap-2"
+              disabled={!diffs.length}
+            >
+              <Download className="h-4 w-4" /> Diff CSV
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={exportAllScansCSV}
+              className="gap-2"
+              disabled={!diffs.length}
+            >
+              <FileSpreadsheet className="h-4 w-4" /> All Scans
+            </Button>
           </div>
         </header>
 
         <section className="grid md:grid-cols-3 gap-6">
           <Card className="md:col-span-2">
             <CardHeader className="pb-2">
-              <CardTitle className="flex items-center gap-2"><Upload className="h-5 w-5" /> Load Inventory CSV (Cloud)</CardTitle>
+              <CardTitle className="flex items-center gap-2">
+                <Upload className="h-5 w-5" /> Load Inventory CSV (Cloud)
+              </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="grid md:grid-cols-3 gap-3">
                 <div className="space-y-2">
                   <Label htmlFor="ns">Namespace</Label>
-                  <Input id="ns" value={namespace} onChange={(e) => setNamespace(e.target.value)} placeholder="e.g., jeddah-warehouse" />
+                  <Input
+                    id="ns"
+                    value={namespace}
+                    onChange={(e) => setNamespace(e.target.value)}
+                    placeholder="e.g., jeddah-warehouse"
+                  />
                   <div className="flex gap-2">
-                    <Button variant="outline" onClick={refreshCloudList} disabled={cloudBusy}>Refresh</Button>
-                    <Button variant="secondary" onClick={() => document.getElementById('hiddenUpload').click()} disabled={cloudBusy}>Upload to Cloud</Button>
-                    <input id="hiddenUpload" type="file" accept=".csv" className="hidden" onChange={(e)=> handleCloudUploadThenLoad(e.target.files?.[0])} />
+                    <Button
+                      variant="outline"
+                      onClick={refreshCloudList}
+                      disabled={cloudBusy}
+                    >
+                      Refresh
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      onClick={() =>
+                        document.getElementById("hiddenUpload").click()
+                      }
+                      disabled={cloudBusy}
+                    >
+                      Upload to Cloud
+                    </Button>
+                    <input
+                      id="hiddenUpload"
+                      type="file"
+                      accept=".csv"
+                      className="hidden"
+                      onChange={(e) =>
+                        handleCloudUploadThenLoad(e.target.files?.[0])
+                      }
+                    />
                   </div>
                 </div>
                 <div className="md:col-span-2 space-y-2">
                   <Label>Select Cloud File</Label>
-                  <select className="w-full border rounded-xl p-2" value={activeKey || ""} onChange={(e)=> handleChooseCloudFile(e.target.value)}>
+                  <select
+                    className="w-full border rounded-xl p-2"
+                    value={activeKey || ""}
+                    onChange={(e) => handleChooseCloudFile(e.target.value)}
+                  >
                     <option value="">Choose...</option>
-                    {cloudFiles.map((f)=> (
-                      <option key={f.key} value={f.key}>{f.key.split("/").pop()} — {f.uploadedAt ? new Date(f.uploadedAt).toLocaleString() : "-"}</option>
+                    {cloudFiles.map((f) => (
+                      <option key={f.key} value={f.key}>
+                        {f.key.split("/").pop()} —{" "}
+                        {f.uploadedAt
+                          ? new Date(f.uploadedAt).toLocaleString()
+                          : "-"}
+                      </option>
                     ))}
                   </select>
                   {fileName && <Badge variant="secondary">{fileName}</Badge>}
                 </div>
               </div>
-              {error && <div className="flex items-start gap-2 text-red-600 text-sm"><AlertTriangle className="h-4 w-4 mt-0.5" /> {error}</div>}
+
+              {error && (
+                <div className="flex items-start gap-2 text-red-600 text-sm">
+                  <AlertTriangle className="h-4 w-4 mt-0.5" /> {error}
+                </div>
+              )}
               <Separator />
               <div className="grid gap-2">
                 <Label htmlFor="barcode">Scan Barcode</Label>
                 <div className="flex gap-2">
-                  <Input id="barcode" ref={barcodeRef} placeholder="Focus here and scan barcode..." onKeyDown={onBarcodeScan} disabled={!rows.length} />
-                  <Button variant="outline" className="gap-2" disabled={!rows.length} onClick={() => barcodeRef.current?.focus()}><BarcodeIcon className="h-4 w-4" /> Focus</Button>
+                  <Input
+                    id="barcode"
+                    ref={barcodeRef}
+                    placeholder="Focus here and scan barcode..."
+                    onKeyDown={onBarcodeScan}
+                    disabled={!rows.length}
+                  />
+                  <Button
+                    variant="outline"
+                    className="gap-2"
+                    disabled={!rows.length}
+                    onClick={() => barcodeRef.current?.focus()}
+                  >
+                    <BarcodeIcon className="h-4 w-4" /> Focus
+                  </Button>
                 </div>
-                {!rows.length && <p className="text-xs text-gray-500">Choose or upload a cloud CSV first with <strong>Barcode</strong>, <strong>Name</strong>, and <strong>On Hand</strong> columns.</p>}
-                {rows.length > 0 && !cols && <p className="text-xs text-red-600">Ensure the CSV headers include Barcode, Name, and On Hand.</p>}
-                {notFound && <p className="text-sm text-amber-700">Barcode <span className="font-semibold">{notFound}</span> not found in the file.</p>}
+                {!rows.length && (
+                  <p className="text-xs text-gray-500">
+                    Choose or upload a cloud CSV first with <strong>Barcode</strong>,{" "}
+                    <strong>Name</strong>, and <strong>On Hand</strong> columns.
+                  </p>
+                )}
+                {rows.length > 0 && !cols && (
+                  <p className="text-xs text-red-600">
+                    Ensure the CSV headers include Barcode, Name, and On Hand.
+                  </p>
+                )}
+                {notFound && (
+                  <p className="text-sm text-amber-700">
+                    Barcode <span className="font-semibold">{notFound}</span> not
+                    found in the file.
+                  </p>
+                )}
               </div>
             </CardContent>
           </Card>
 
           <Card>
-            <CardHeader className="pb-2"><CardTitle>Progress</CardTitle></CardHeader>
+            <CardHeader className="pb-2">
+              <CardTitle>Progress</CardTitle>
+            </CardHeader>
             <CardContent className="space-y-2 text-sm">
-              <div className="flex items-center justify-between"><span>Total items</span><span className="font-medium">{rows.length}</span></div>
-              <div className="flex items-center justify-between"><span>Scanned (unique)</span><span className="font-medium">{new Set(diffs.map((d)=> d.barcode)).size}</span></div>
-              <div className="flex items-center justify-between"><span>With differences</span><span className="font-medium">{diffs.filter((d)=> d.delta !== 0).length}</span></div>
+              <div className="flex items-center justify-between">
+                <span>Total items</span>
+                <span className="font-medium">{rows.length}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>Scanned (unique)</span>
+                <span className="font-medium">
+                  {new Set(diffs.map((d) => d.barcode)).size}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>With differences</span>
+                <span className="font-medium">
+                  {diffs.filter((d) => d.delta !== 0).length}
+                </span>
+              </div>
             </CardContent>
           </Card>
         </section>
@@ -374,15 +581,34 @@ export default function InventoryScannerApp() {
                 </tr>
               </thead>
               <tbody>
-                {diffs.length === 0 && (<tr><td colSpan={6} className="px-3 py-6 text-center text-gray-500">No scans yet.</td></tr>)}
+                {diffs.length === 0 && (
+                  <tr>
+                    <td
+                      colSpan={6}
+                      className="px-3 py-6 text-center text-gray-500"
+                    >
+                      No scans yet.
+                    </td>
+                  </tr>
+                )}
                 {diffs.map((d) => (
                   <tr key={d.barcode} className="border-t">
-                    <td className="px-3 py-2">{new Date(d.ts).toLocaleString()}</td>
+                    <td className="px-3 py-2">
+                      {new Date(d.ts).toLocaleString()}
+                    </td>
                     <td className="px-3 py-2 font-mono">{d.barcode}</td>
                     <td className="px-3 py-2">{d.name}</td>
                     <td className="px-3 py-2 text-right">{d.prevOnHand}</td>
                     <td className="px-3 py-2 text-right">{d.actual}</td>
-                    <td className={`px-3 py-2 text-right ${d.delta === 0 ? "text-gray-600" : d.delta > 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                    <td
+                      className={`px-3 py-2 text-right ${
+                        d.delta === 0
+                          ? "text-gray-600"
+                          : d.delta > 0
+                          ? "text-emerald-600"
+                          : "text-rose-600"
+                      }`}
+                    >
                       {d.delta > 0 ? `+${d.delta}` : d.delta}
                     </td>
                   </tr>
@@ -393,7 +619,7 @@ export default function InventoryScannerApp() {
         </section>
       </div>
 
-      {/* Popup Modal */}
+      {/* Popup Modal for confirming Actual */}
       <Dialog open={!!active} onOpenChange={(open) => !open && setActive(null)}>
         <DialogContent className="sm:max-w-lg">
           {active && (
@@ -401,27 +627,56 @@ export default function InventoryScannerApp() {
               <DialogHeader>
                 <DialogTitle className="text-2xl">{active.name}</DialogTitle>
                 <DialogDescription>
-                  <div className="text-base">Barcode: <span className="font-mono font-medium">{active.barcode}</span></div>
+                  <div className="text-base">
+                    Barcode:{" "}
+                    <span className="font-mono font-medium">{active.barcode}</span>
+                  </div>
                 </DialogDescription>
               </DialogHeader>
               <div className="grid grid-cols-3 gap-3">
                 <StatBox label="On Hand" value={active.onHand} large />
                 <StatBox label="Reserved" value={active.reserved} muted />
                 <div className="col-span-3">
-                  <Label htmlFor="actual" className="text-sm">Actual On Hand</Label>
-                  <Input id="actual" type="number" inputMode="numeric" value={actualQty}
+                  <Label htmlFor="actual" className="text-sm">
+                    Actual On Hand
+                  </Label>
+                  <Input
+                    id="actual"
+                    type="number"
+                    inputMode="numeric"
+                    value={actualQty}
                     onChange={(e) => setActualQty(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter") confirmQty(actualQty); if (e.key === "Escape") setActive(null); }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") confirmQty(actualQty);
+                      if (e.key === "Escape") setActive(null);
+                    }}
                     className="text-lg"
                   />
-                  <p className="text-xs text-gray-500 mt-1">Press <strong>Enter</strong> to save, <strong>Esc</strong> to cancel.</p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Press <strong>Enter</strong> to save, <strong>Esc</strong> to
+                    cancel.
+                  </p>
                 </div>
               </div>
               <DialogFooter className="flex items-center justify-between gap-2">
-                <Button variant="outline" className="gap-2" onClick={() => setActive(null)}><X className="h-4 w-4" /> Cancel</Button>
+                <Button
+                  variant="outline"
+                  className="gap-2"
+                  onClick={() => setActive(null)}
+                >
+                  <X className="h-4 w-4" /> Cancel
+                </Button>
                 <div className="flex gap-2">
-                  <Button variant="secondary" className="gap-2" onClick={() => confirmQty(active.onHand)}><Check className="h-4 w-4" /> Confirm current ({active.onHand})</Button>
-                  <Button className="gap-2" onClick={() => confirmQty(actualQty)}><Check className="h-4 w-4" /> Save Actual</Button>
+                  <Button
+                    variant="secondary"
+                    className="gap-2"
+                    onClick={() => confirmQty(active.onHand)}
+                  >
+                    <Check className="h-4 w-4" /> Confirm current ({active.onHand})
+                  </Button>
+                  <Button className="gap-2" onClick={() => confirmQty(actualQty)}>
+                    <Check className="h-4 w-4" /> Save Actual
+                  </Button>
                 </div>
               </DialogFooter>
             </div>
@@ -436,18 +691,26 @@ function StatBox({ label, value, large, muted }) {
   return (
     <Card className={`border-2 ${muted ? "border-gray-200" : "border-gray-300"}`}>
       <CardContent className="p-4">
-        <div className="text-xs uppercase tracking-wide text-gray-500">{label}</div>
-        <div className={`${large ? "text-3xl" : "text-xl"} font-semibold`}>{value}</div>
+        <div className="text-xs uppercase tracking-wide text-gray-500">
+          {label}
+        </div>
+        <div className={`${large ? "text-3xl" : "text-xl"} font-semibold`}>
+          {value}
+        </div>
       </CardContent>
     </Card>
   );
 }
 
-// Self-test
-(function runSelfTests(){
-  try{
-    const m = mapColumns(["Barcode","Name","On Hand","Reserved"]);
+/* ============================
+   Self Tests (console)
+   ============================ */
+(function runSelfTests() {
+  try {
+    const m = mapColumns(["Barcode", "Name", "On Hand", "Reserved"]);
     console.assert(m && m.barcode && m.name && m.onHand, "mapColumns failed");
-    console.log("Self-tests passed ✓");
-  }catch(e){ console.warn("Self-tests issue:", e); }
+    console.log("Inventory Scanner: self-tests passed ✓");
+  } catch (e) {
+    console.warn("Inventory Scanner: self-tests encountered an issue:", e);
+  }
 })();
