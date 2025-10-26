@@ -1,18 +1,5 @@
 import { getStore } from "@netlify/blobs";
-
-const STORE = "inventory"; // blob store name (auto-provisioned)
-export function getInventoryStore() {
-  return getStore({ name: STORE });
-}
-
-export function json(res, status = 200) {
-  return {
-    statusCode: status,
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(res),
-  };
-}
-
-export function bad(res, status = 400) {
-  return json({ error: typeof res === "string" ? res : "Bad Request", detail: res }, status);
-}
+const STORE="inventory";
+export function getInventoryStore(){ return getStore({ name: STORE }); }
+export function json(res, status=200){ return { statusCode: status, headers: {"content-type":"application/json"}, body: JSON.stringify(res) }; }
+export function bad(res, status=400){ return json({ error: typeof res==="string" ? res : "Bad Request", detail: res }, status); }

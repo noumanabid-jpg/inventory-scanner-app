@@ -1,6 +1,6 @@
 {
   "name": "inventory-scanner-app",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,12 +9,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@netlify/blobs": "^6.3.1",
     "framer-motion": "^11.0.0",
     "lucide-react": "^0.460.0",
     "papaparse": "^5.4.1",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "@netlify/blobs": "^6.3.1"
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
