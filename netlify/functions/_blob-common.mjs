@@ -3,21 +3,8 @@ import { getStore } from "@netlify/blobs";
 const STORE = "inventory";
 
 export function getInventoryStore() {
-  const opts = { name: STORE };
-  const siteID =
-    process.env.NETLIFY_SITE_ID || process.env.SITE_ID; // allow both names
-  const token =
-    process.env.NETLIFY_ACCESS_TOKEN ||
-    process.env.NETLIFY_API_TOKEN ||
-    process.env.TOKEN;
-
-  // If both are present, use manual mode; otherwise Netlify runtime should supply them.
-  if (siteID && token) {
-    opts.siteID = siteID;
-    opts.token = token;
-  }
-
-  return getStore(opts);
+  // On live Netlify, credentials are injected automatically.
+  return getStore({ name: STORE });
 }
 
 export function json(res, status = 200) {
