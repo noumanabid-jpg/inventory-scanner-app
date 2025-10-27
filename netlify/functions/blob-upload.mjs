@@ -13,11 +13,10 @@ export async function handler(event) {
   try {
     if (!event.body) return bad("Empty body", 400);
 
-    // Try to decode as base64 first; if that fails, fall back to utf8.
+    // Body is base64 from the app; fall back to utf8 if needed
     let bytes;
     try {
       bytes = Buffer.from(event.body, "base64");
-      // If decode produced empty but body isn't empty, fall back
       if (bytes.length === 0 && event.body.length > 0) {
         bytes = Buffer.from(event.body, "utf8");
       }
@@ -31,6 +30,6 @@ export async function handler(event) {
 
     return json({ ok: true, key });
   } catch (e) {
-    return bad(e?.message || "Upload failed", 500);
+    return bad(`Upload error: ${e?.message || e}`, 500);
   }
 }
