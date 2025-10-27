@@ -34,6 +34,7 @@ const toNumber = (v) => {
   return Number.isFinite(n) ? n : 0;
 };
 
+// If downloaded text is base64, decode it.
 function decodeMaybeBase64(s) {
   if (!s) return s;
   const t = String(s).trim();
@@ -47,9 +48,12 @@ function decodeMaybeBase64(s) {
   }
 }
 
+// Try multiple CSV parsing strategies until we get rows
 function parseCSVSmart(text) {
   if (!text || !text.trim()) return { rows: [], headers: [], reason: "CSV text is empty" };
-  const sanitize = (x) => x?.replace(/\uFEFF/g, "");
+
+  const sanitize = (x) => x?.replace(/\uFEFF/g, ""); // strip BOM
+
   const strategies = [
     { name: "auto", opts: { header: true, skipEmptyLines: "greedy", delimitersToGuess: [",", "\t", ";", "|"] } },
     { name: "comma", opts: { header: true, skipEmptyLines: "greedy", delimiter: "," } },
@@ -57,32 +61,40 @@ function parseCSVSmart(text) {
     { name: "semicolon", opts: { header: true, skipEmptyLines: "greedy", delimiter: ";" } },
     { name: "pipe", opts: { header: true, skipEmptyLines: "greedy", delimiter: "|" } },
   ];
+
   for (const s of strategies) {
+    let parsed;
     try {
-      const parsed = Papa.parse(sanitize(text), {
+      parsed = Papa.parse(sanitize(text), {
         ...s.opts,
         transformHeader: (h) => sanitize(String(h || "").trim()),
         worker: false,
       });
-      const data = Array.isArray(parsed?.data) ? parsed.data : [];
-      if (data.length > 0) {
-        const headers = Object.keys(data[0] || {});
-        return { rows: data, headers, reason: null, strategy: s.name };
-      }
-    } catch { /* try next */ }
+    } catch {
+      continue;
+    }
+    const data = Array.isArray(parsed?.data) ? parsed.data : [];
+    if (data.length > 0) {
+      const headers = Object.keys(data[0] || {});
+      return { rows: data, headers, reason: null, strategy: s.name };
+    }
   }
+
   const firstLine = sanitize(text).split(/\r?\n/)[0]?.slice(0, 200) || "";
   return { rows: [], headers: [], reason: `No rows parsed. First line: "${firstLine}"` };
 }
 
+// Normalize a barcode/string for matching
 function normCode(v) {
   let s = String(v ?? "");
-  s = s.replace(/\uFEFF/g, "");
+  s = s.replace(/\uFEFF/g, ""); // strip BOM
   s = s.trim();
-  s = s.replace(/\s+/g, "");
-  s = s.replace(/[^\w-]/g, "");
+  s = s.replace(/\s+/g, "");   // remove internal spaces
+  s = s.replace(/[^\w-]/g, ""); // keep letters/numbers/_/-
   return s;
 }
+
+// For numeric codes, also return a variant without leading zeros
 function normVariants(v) {
   const a = normCode(v);
   if (/^\d+$/.test(a)) {
@@ -101,17 +113,41 @@ function mapColumns(headers) {
       .replace(/[()]/g, "")
       .replace(/[\s_/|-]+/g, "")
       .trim();
+
   const find = (aliases) => raw.find((h) => aliases.map(norm).includes(norm(h)));
+
   const cols = {
     barcode: find(["barcode", "bar code", "sku", "itemcode", "itemid", "productcode", "upc", "ean", "gtin", "code"]),
     name: find(["name", "productname", "title", "item", "itemname", "description", "product", "producttitle"]),
     onHand: find([
-      "onhand","on hand","onhandnew","on hand new","onhand(noteditable)","onhandnew(noteditable)",
-      "qtyonhand","quantityonhand","stock","qty","quantity","available","availableqty",
-      "availablequantity","available(noteditable)","onhand(new)",
+      "onhand",
+      "on hand",
+      "onhandnew",
+      "on hand new",
+      "onhand(noteditable)",
+      "onhandnew(noteditable)",
+      "qtyonhand",
+      "quantityonhand",
+      "stock",
+      "qty",
+      "quantity",
+      "available",
+      "availableqty",
+      "availablequantity",
+      "available(noteditable)",
+      "onhand(new)",
     ]),
-    reserved: find(["reserved","allocated","onhold","on hold","committed","committed(noteditable)","allocatedqty"]),
+    reserved: find([
+      "reserved",
+      "allocated",
+      "onhold",
+      "on hold",
+      "committed",
+      "committed(noteditable)",
+      "allocatedqty",
+    ]),
   };
+
   if (!cols.barcode || !cols.name || !cols.onHand) return null;
   return cols;
 }
@@ -136,11 +172,16 @@ async function nfList(ns) {
   }
   const out = await res.json();
   const files = (out.files || [])
-    .map((f) => ({ key: f.key || f.name || f.id, size: f.size ?? f.bytes ?? null, uploadedAt: f.uploadedAt || f.uploaded_at || null }))
+    .map((f) => ({
+      key: f.key || f.name || f.id,
+      size: f.size ?? f.bytes ?? null,
+      uploadedAt: f.uploadedAt || f.uploaded_at || null,
+    }))
     .filter((f) => f.key && /\.csv$/i.test(f.key));
   return { ...out, files };
 }
 
+// List ALL blobs (used to discover existing scans JSON)
 async function nfListAll(ns) {
   const res = await fetch(`/.netlify/functions/blob-list?ns=${encodeURIComponent(ns)}&ts=${Date.now()}`);
   if (!res.ok) {
@@ -148,10 +189,15 @@ async function nfListAll(ns) {
     throw new Error(`List-all failed: ${res.status}${msg ? ` – ${msg}` : ""}`);
   }
   const out = await res.json();
-  const files = (out.files || []).map((f) => ({ key: f.key || f.name || f.id, size: f.size ?? f.bytes ?? null, uploadedAt: f.uploadedAt || f.uploaded_at || null }));
+  const files = (out.files || []).map((f) => ({
+    key: f.key || f.name || f.id,
+    size: f.size ?? f.bytes ?? null,
+    uploadedAt: f.uploadedAt || f.uploaded_at || null,
+  }));
   return { ...out, files };
 }
 
+// Convert ArrayBuffer -> base64 in chunks (avoids call-stack overflow)
 function bufferToBase64(arrayBuffer) {
   const bytes = new Uint8Array(arrayBuffer);
   const chunkSize = 0x8000;
@@ -175,6 +221,7 @@ async function nfUpload(ns, file) {
   return res.json();
 }
 
+// Server may return plain CSV text or base64 string → we handle both.
 async function nfDownload(key) {
   const res = await fetch(`/.netlify/functions/blob-download?key=${encodeURIComponent(key)}&ts=${Date.now()}`);
   if (!res.ok) {
@@ -205,6 +252,7 @@ async function nfGetJSON(key) {
    Scans key helpers (multi-location support)
    ───────────────────────────── */
 
+// Canonical scans key (keeps prefix if present, avoids leading slash)
 const scansKeyFor = (fileKey) => {
   const parts = String(fileKey || "").split("/");
   const base = (parts.pop() || "file").replace(/\.[^.]+$/, "");
@@ -212,14 +260,18 @@ const scansKeyFor = (fileKey) => {
   return `${prefix ? prefix + "/" : ""}scans/${base}.json`;
 };
 
+// Generate all plausible locations where scans may live
 const scanKeyCandidates = (fileKey, namespace) => {
   const parts = String(fileKey || "").split("/");
   const filename = parts.pop() || "file.csv";
   const base = filename.replace(/\.[^.]+$/, "");
-  const primary = scansKeyFor(fileKey);
-  const root    = `scans/${base}.json`;
-  const nsRoot  = `${namespace}/scans/${base}.json`;
-  const scansNs = `scans/${namespace}/${base}.json`;
+  const prefix = parts.join("/"); // "" or like "default"
+
+  const primary = scansKeyFor(fileKey);              // "<prefix>/scans/<base>.json" or "scans/<base>.json"
+  const root    = `scans/${base}.json`;              // "scans/<base>.json"
+  const nsRoot  = `${namespace}/scans/${base}.json`; // "<ns>/scans/<base>.json"
+  const scansNs = `scans/${namespace}/${base}.json`; // "scans/<ns>/<base>.json" (early variant)
+
   return Array.from(new Set([primary, nsRoot, root, scansNs]));
 };
 
@@ -228,16 +280,19 @@ const scanKeyCandidates = (fileKey, namespace) => {
    ───────────────────────────── */
 
 export default function InventoryScannerApp() {
+  // Cloud / files
   const [namespace, setNamespace] = useState("default");
-  const [cloudFiles, setCloudFiles] = useState([]);
+  const [cloudFiles, setCloudFiles] = useState([]); // {key,size,uploadedAt}
   const [cloudBusy, setCloudBusy] = useState(false);
   const [activeKey, setActiveKey] = useState("");
 
+  // Data
   const [rows, setRows] = useState([]);
   const [fileName, setFileName] = useState("");
   const [error, setError] = useState("");
   const cols = useColumns(rows);
 
+  // Fast lookup by Barcode (with variants)
   const index = useMemo(() => {
     if (!cols) return new Map();
     const m = new Map();
@@ -250,14 +305,16 @@ export default function InventoryScannerApp() {
     return m;
   }, [rows, cols]);
 
-  const [diffs, setDiffs] = useState([]);
+  // Scans & UI
+  const [diffs, setDiffs] = useState([]); // persisted per-file
   const [active, setActive] = useState(null);
   const [actualQty, setActualQty] = useState("");
   const [notFound, setNotFound] = useState("");
   const [saving, setSaving] = useState(false);
   const barcodeRef = useRef(null);
   const lastSavedRef = useRef("");
-  const resolvedScansKeyRef = useRef("");
+  const resolvedScansKeyRef = useRef(""); // where scans were found/saved for current file
+  const loadingScansRef = useRef(false);  // ⛔️ pause autosave during loads
 
   useEffect(() => {
     const t = setTimeout(() => barcodeRef.current?.focus(), 200);
@@ -272,7 +329,7 @@ export default function InventoryScannerApp() {
       arr.sort((a, b) => {
         const ta = a.uploadedAt ? new Date(a.uploadedAt).getTime() : 0;
         const tb = b.uploadedAt ? new Date(b.uploadedAt).getTime() : 0;
-        if (tb !== ta) return tb - ta;
+        if (tb !== ta) return tb - ta; // newest first
         return (b.key || "").localeCompare(a.key || "");
       });
       setCloudFiles(arr);
@@ -283,6 +340,7 @@ export default function InventoryScannerApp() {
     }
   };
 
+  // Upload → insert into list immediately → load → refresh
   const handleCloudUploadThenLoad = async (file) => {
     if (!file) return;
     setCloudBusy(true);
@@ -302,17 +360,20 @@ export default function InventoryScannerApp() {
     }
   };
 
+  // Robust CSV parsing with base64 auto-decode + multiple strategies
   const loadCSVFromCloud = async (key) => {
     setCloudBusy(true);
     try {
       const blob = await nfDownload(key);
-      const raw = await blob.text();
-      const text = decodeMaybeBase64(raw);
+      const raw = await blob.text();          // may be CSV or base64
+      const text = decodeMaybeBase64(raw);    // auto-decode if needed
+
       const result = parseCSVSmart(text);
 
       if (!result.rows.length) {
         setRows([]);
         setFileName(key.split("/").pop());
+        // DO NOT clear diffs here. loadScansForActive will set diffs.
         setNotFound("");
         setError(result.reason || "Failed to parse CSV");
         return;
@@ -320,6 +381,7 @@ export default function InventoryScannerApp() {
 
       setRows(result.rows);
       setFileName(key.split("/").pop());
+      // DO NOT clear diffs here. loadScansForActive will set diffs.
       setNotFound("");
       setError("");
     } catch (e) {
@@ -329,86 +391,105 @@ export default function InventoryScannerApp() {
     }
   };
 
+  // Load scans: quick candidates → search all blobs → else set canonical
   const loadScansForActive = async (fileKey) => {
-    const quickCandidates = scanKeyCandidates(fileKey, namespace);
-
-    for (const key of quickCandidates) {
-      try {
-        const res = await nfGetJSON(key);
-        const arr =
-          (res && Array.isArray(res.diffs) && res.diffs) ||
-          (res && res.data && Array.isArray(res.data.diffs) && res.data.diffs) ||
-          null;
-
-        if (arr) {
-          setDiffs(arr);
-          lastSavedRef.current = JSON.stringify({ diffs: arr });
-          resolvedScansKeyRef.current = key;
-          try { console.log("Loaded scans from:", key, "count:", arr.length); } catch {}
-          return;
-        }
-      } catch { /* try next */ }
-    }
-
+    loadingScansRef.current = true; // 🔒 pause autosave
     try {
-      const parts = String(fileKey || "").split("/");
-      const filename = parts.pop() || "file.csv";
-      const base = filename.replace(/\.[^.]+$/, "");
-      const targetSuffix = `/scans/${base}.json`;
+      const quickCandidates = scanKeyCandidates(fileKey, namespace);
 
-      const all = await nfListAll(namespace);
-      const candidates = (all.files || [])
-        .filter((f) => {
-          const k = String(f.key || "");
-          return (
-            k.endsWith(targetSuffix) ||
-            k === `scans/${base}.json` ||
-            k === `${namespace}/scans/${base}.json` ||
-            k === `scans/${namespace}/${base}.json`
-          );
-        })
-        .sort((a, b) => {
-          const ta = a.uploadedAt ? new Date(a.uploadedAt).getTime() : 0;
-          const tb = b.uploadedAt ? new Date(b.uploadedAt).getTime() : 0;
-          return tb - ta;
-        });
-
-      for (const f of candidates) {
+      for (const key of quickCandidates) {
         try {
-          const res = await nfGetJSON(f.key);
+          const res = await nfGetJSON(key);
           const arr =
             (res && Array.isArray(res.diffs) && res.diffs) ||
             (res && res.data && Array.isArray(res.data.diffs) && res.data.diffs) ||
             null;
+
           if (arr) {
             setDiffs(arr);
             lastSavedRef.current = JSON.stringify({ diffs: arr });
-            resolvedScansKeyRef.current = f.key;
-            try { console.log("Loaded scans (discovered) from:", f.key, "count:", arr.length); } catch {}
+            resolvedScansKeyRef.current = key; // remember where we found it
+            try { console.log("Loaded scans from:", key, "count:", arr.length); } catch {}
             return;
           }
-        } catch { /* keep trying */ }
+        } catch {
+          // keep trying
+        }
       }
-    } catch (e) {
-      try { console.warn("Search for scans failed:", e); } catch {}
-    }
 
-    setDiffs([]);
-    lastSavedRef.current = JSON.stringify({ diffs: [] });
-    resolvedScansKeyRef.current = scansKeyFor(fileKey);
-    try { console.log("No saved scans found. Will use:", resolvedScansKeyRef.current); } catch {}
+      // if not found, search all blobs for any scans/<base>.json variants
+      try {
+        const parts = String(fileKey || "").split("/");
+        const filename = parts.pop() || "file.csv";
+        const base = filename.replace(/\.[^.]+$/, "");
+        const targetSuffix = `/scans/${base}.json`;
+
+        const all = await nfListAll(namespace);
+        const candidates = (all.files || [])
+          .filter((f) => {
+            const k = String(f.key || "");
+            return (
+              k.endsWith(targetSuffix) ||
+              k === `scans/${base}.json` ||
+              k === `${namespace}/scans/${base}.json` ||
+              k === `scans/${namespace}/${base}.json`
+            );
+          })
+          .sort((a, b) => {
+            const ta = a.uploadedAt ? new Date(a.uploadedAt).getTime() : 0;
+            const tb = b.uploadedAt ? new Date(b.uploadedAt).getTime() : 0;
+            return tb - ta;
+          });
+
+        for (const f of candidates) {
+          try {
+            const res = await nfGetJSON(f.key);
+            const arr =
+              (res && Array.isArray(res.diffs) && res.diffs) ||
+              (res && res.data && Array.isArray(res.data.diffs) && res.data.diffs) ||
+              null;
+            if (arr) {
+              setDiffs(arr);
+              lastSavedRef.current = JSON.stringify({ diffs: arr });
+              resolvedScansKeyRef.current = f.key; // lock discovered key
+              try { console.log("Loaded scans (discovered) from:", f.key, "count:", arr.length); } catch {}
+              return;
+            }
+          } catch {
+            // try next
+          }
+        }
+      } catch (e) {
+        try { console.warn("Search for scans failed:", e); } catch {}
+      }
+
+      // nothing found — start fresh and pick canonical for future saves
+      setDiffs([]);
+      lastSavedRef.current = JSON.stringify({ diffs: [] });
+      resolvedScansKeyRef.current = scansKeyFor(fileKey);
+      try { console.log("No saved scans found. Will use:", resolvedScansKeyRef.current); } catch {}
+    } finally {
+      loadingScansRef.current = false; // 🔓 resume autosave
+    }
   };
 
   const handleChooseCloudFile = async (key) => {
     setActiveKey(key);
-    await loadCSVFromCloud(key);
-    await loadScansForActive(key);
-    barcodeRef.current?.focus();
+    loadingScansRef.current = true; // 🔒 pause autosave across the whole select flow
+    try {
+      await loadCSVFromCloud(key);      // do NOT clear diffs here
+      await loadScansForActive(key);    // will set diffs from server
+      barcodeRef.current?.focus();
+    } finally {
+      loadingScansRef.current = false;  // 🔓 resume autosave
+    }
   };
 
-  // Debounced auto-save — write, mirror, then VERIFY and set state from server
+  // Debounced auto-save of scans — save to resolved key first, mirror to others, then verify
   useEffect(() => {
     if (!activeKey) return;
+    if (loadingScansRef.current) return; // ⛔️ don’t autosave during load
+
     const payload = JSON.stringify({ diffs });
     if (payload === lastSavedRef.current) return;
 
@@ -421,8 +502,8 @@ export default function InventoryScannerApp() {
         const primary = resolvedScansKeyRef.current || allKeys[0];
         const others = allKeys.filter((k) => k !== primary);
 
-        await nfPutJSON(primary, { diffs });
-        await Promise.allSettled(others.map((k) => nfPutJSON(k, { diffs })));
+        await nfPutJSON(primary, { diffs }); // write main
+        await Promise.allSettled(others.map((k) => nfPutJSON(k, { diffs }))); // mirror
 
         // Read-after-write verify and set state from the verified payload
         try {
@@ -431,7 +512,7 @@ export default function InventoryScannerApp() {
             (verify && Array.isArray(verify.diffs) && verify.diffs) ||
             (verify && verify.data && Array.isArray(verify.data.diffs) && verify.data.diffs) ||
             [];
-          setDiffs(arr); // <- ensure UI matches what the server has
+          setDiffs(arr); // ensure UI mirrors server
           console.log("Verified saved count:", arr.length, "at", primary);
         } catch (e) {
           console.warn("Post-save verify failed:", e);
@@ -453,6 +534,7 @@ export default function InventoryScannerApp() {
     };
   }, [activeKey, diffs, namespace]);
 
+  // Scanning & actions
   const onBarcodeScan = (e) => {
     if (e.key !== "Enter") return;
     const scanned = e.currentTarget.value;
@@ -462,17 +544,20 @@ export default function InventoryScannerApp() {
       setError("Missing required columns: Barcode, Name, and On Hand.");
       return;
     }
+
     let r = null;
     for (const k of candidates) {
       r = index.get(k);
       if (r) break;
     }
+
     if (!r) {
       setActive(null);
       setNotFound(candidates[0]);
       e.currentTarget.select();
       return;
     }
+
     const item = {
       barcode: String(r[cols.barcode] ?? "").trim(),
       name: String(r[cols.name] ?? "").trim(),
@@ -556,13 +641,18 @@ export default function InventoryScannerApp() {
     URL.revokeObjectURL(url);
   };
 
-  /* UI */
+  /* ─────────────────────────────
+     UI (mobile-first responsive)
+     ───────────────────────────── */
   return (
     <div className="min-h-screen w-full bg-gray-50 p-3 sm:p-4 md:p-8">
       <div className="mx-auto max-w-6xl space-y-4 sm:space-y-6">
+        {/* Header */}
         <header className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 sm:gap-4">
           <div className="space-y-1">
-            <h1 className="text-xl sm:text-2xl md:text-3xl font-semibold tracking-tight">Inventory Barcode Scanner</h1>
+            <h1 className="text-xl sm:text-2xl md:text-3xl font-semibold tracking-tight">
+              Inventory Barcode Scanner
+            </h1>
             <p className="text-xs sm:text-sm text-gray-600">
               Load a <strong>cloud CSV</strong>, scan <strong>barcodes</strong>, adjust quantities, and export results.
             </p>
@@ -586,6 +676,7 @@ export default function InventoryScannerApp() {
           </div>
         </header>
 
+        {/* Top controls */}
         <section className="grid md:grid-cols-3 gap-4 sm:gap-6">
           <Card className="md:col-span-2">
             <CardHeader className="pb-2">
@@ -597,22 +688,47 @@ export default function InventoryScannerApp() {
               <div className="grid gap-3 sm:gap-4 md:grid-cols-3">
                 <div className="space-y-2">
                   <Label htmlFor="ns" className="text-xs sm:text-sm">Namespace</Label>
-                  <Input id="ns" value={namespace} onChange={(e) => setNamespace(e.target.value)} placeholder="e.g., default or jeddah-warehouse" />
+                  <Input
+                    id="ns"
+                    value={namespace}
+                    onChange={(e) => setNamespace(e.target.value)}
+                    placeholder="e.g., default or jeddah-warehouse"
+                  />
                   <div className="flex flex-wrap gap-2">
-                    <Button variant="outline" onClick={refreshCloudList} disabled={cloudBusy} className="flex-1 sm:flex-none">Refresh</Button>
-                    <Button variant="secondary" onClick={() => document.getElementById("hiddenUpload").click()} disabled={cloudBusy} className="flex-1 sm:flex-none">Upload</Button>
-                    <input id="hiddenUpload" type="file" accept=".csv" className="hidden" onChange={(e) => handleCloudUploadThenLoad(e.target.files?.[0])} />
+                    <Button variant="outline" onClick={refreshCloudList} disabled={cloudBusy} className="flex-1 sm:flex-none">
+                      Refresh
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      onClick={() => document.getElementById("hiddenUpload").click()}
+                      disabled={cloudBusy}
+                      className="flex-1 sm:flex-none"
+                    >
+                      Upload
+                    </Button>
+                    <input
+                      id="hiddenUpload"
+                      type="file"
+                      accept=".csv"
+                      className="hidden"
+                      onChange={(e) => handleCloudUploadThenLoad(e.target.files?.[0])}
+                    />
                   </div>
                 </div>
 
                 <div className="md:col-span-2 space-y-2">
                   <Label className="text-xs sm:text-sm">Select Cloud File</Label>
                   <div className="relative">
-                    <select className="w-full border rounded-xl p-2 pr-8 text-sm" value={activeKey || ""} onChange={(e) => handleChooseCloudFile(e.target.value)}>
+                    <select
+                      className="w-full border rounded-xl p-2 pr-8 text-sm"
+                      value={activeKey || ""}
+                      onChange={(e) => handleChooseCloudFile(e.target.value)}
+                    >
                       <option value="">Choose...</option>
                       {cloudFiles.map((f) => (
                         <option key={f.key} value={f.key}>
-                          {f.key.split("/").pop()}{f.uploadedAt ? ` — ${new Date(f.uploadedAt).toLocaleString()}` : ""}
+                          {f.key.split("/").pop()}
+                          {f.uploadedAt ? ` — ${new Date(f.uploadedAt).toLocaleString()}` : ""}
                         </option>
                       ))}
                     </select>
@@ -620,7 +736,9 @@ export default function InventoryScannerApp() {
                   {fileName && <Badge variant="secondary" className="text-xs">{fileName}</Badge>}
                   {activeKey && (
                     <div className="flex flex-wrap gap-2">
-                      <Button size="sm" variant="outline" onClick={() => loadScansForActive(activeKey)}>Force Reload Scans</Button>
+                      <Button size="sm" variant="outline" onClick={() => loadScansForActive(activeKey)}>
+                        Force Reload Scans
+                      </Button>
                     </div>
                   )}
                 </div>
@@ -637,8 +755,20 @@ export default function InventoryScannerApp() {
               <div className="grid gap-2">
                 <Label htmlFor="barcode" className="text-xs sm:text-sm">Scan Barcode</Label>
                 <div className="flex gap-2">
-                  <Input id="barcode" ref={barcodeRef} placeholder="Focus here and scan barcode..." onKeyDown={onBarcodeScan} disabled={!cols} className="flex-1" />
-                  <Button variant="outline" className="gap-2" disabled={!cols} onClick={() => barcodeRef.current?.focus()}>
+                  <Input
+                    id="barcode"
+                    ref={barcodeRef}
+                    placeholder="Focus here and scan barcode..."
+                    onKeyDown={onBarcodeScan}
+                    disabled={!cols}
+                    className="flex-1"
+                  />
+                  <Button
+                    variant="outline"
+                    className="gap-2"
+                    disabled={!cols}
+                    onClick={() => barcodeRef.current?.focus()}
+                  >
                     <BarcodeIcon className="h-4 w-4" /> Focus
                   </Button>
                 </div>
@@ -646,7 +776,11 @@ export default function InventoryScannerApp() {
                 {rows.length > 0 && (
                   <p className="text-xs text-gray-600">
                     Loaded <strong>{rows.length}</strong> rows.&nbsp;
-                    {cols ? <>Detected: <strong>Barcode</strong>, <strong>Name</strong>, <strong>On Hand</strong>{cols.reserved ? ", " : ""}{cols.reserved ? <strong>Reserved</strong> : null}.</> : <>Couldn’t find required headers in the CSV.</>}
+                    {cols ? (
+                      <>Detected: <strong>Barcode</strong>, <strong>Name</strong>, <strong>On Hand</strong>{cols.reserved ? ", " : ""}{cols.reserved ? <strong>Reserved</strong> : null}.</>
+                    ) : (
+                      <>Couldn’t find required headers in the CSV.</>
+                    )}
                   </p>
                 )}
 
@@ -659,6 +793,7 @@ export default function InventoryScannerApp() {
             </CardContent>
           </Card>
 
+          {/* Progress card */}
           <Card>
             <CardHeader className="pb-2"><CardTitle className="text-base sm:text-lg">Progress</CardTitle></CardHeader>
             <CardContent className="space-y-2 text-sm">
@@ -669,6 +804,7 @@ export default function InventoryScannerApp() {
           </Card>
         </section>
 
+        {/* Recent scans table */}
         <section className="grid gap-3 sm:gap-4">
           <h2 className="text-base sm:text-lg font-semibold">Recent Scans</h2>
           <div className="overflow-x-auto rounded-xl border bg-white">
@@ -707,22 +843,28 @@ export default function InventoryScannerApp() {
         </section>
       </div>
 
+      {/* Mobile bottom bar for quick actions (shows after a file is loaded) */}
       {rows.length > 0 && (
         <div className="fixed bottom-3 inset-x-3 md:hidden">
           <div className="rounded-2xl shadow-lg border bg-white p-3 flex gap-2">
-            <Button className="flex-1" onClick={exportDifferencesCSV} disabled={!diffs.length}>Diff CSV</Button>
-            <Button variant="secondary" className="flex-1" onClick={exportAllScansCSV} disabled={!diffs.length}>All Scans</Button>
+            <Button className="flex-1" onClick={exportDifferencesCSV} disabled={!diffs.length}>
+              Diff CSV
+            </Button>
+            <Button variant="secondary" className="flex-1" onClick={exportAllScansCSV} disabled={!diffs.length}>
+              All Scans
+            </Button>
           </div>
         </div>
       )}
 
+      {/* Modal to confirm actual qty */}
       <Dialog open={!!active} onOpenChange={(open) => !open && setActive(null)}>
         <DialogContent className="sm:max-w-lg">
           {active && (
             <div className="space-y-4">
               <DialogHeader>
                 <DialogTitle className="text-xl sm:text-2xl">{active.name}</DialogTitle>
-                <DialogDescription>
+              <DialogDescription>
                   <div className="text-sm sm:text-base">
                     Barcode: <span className="font-mono font-medium break-all">{active.barcode}</span>
                   </div>
@@ -771,6 +913,7 @@ export default function InventoryScannerApp() {
   );
 }
 
+/* Small stat card */
 function StatBox({ label, value, large, muted }) {
   return (
     <Card className={`border-2 ${muted ? "border-gray-200" : "border-gray-300"}`}>
