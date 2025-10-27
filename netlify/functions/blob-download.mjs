@@ -1,3 +1,4 @@
+// netlify/functions/blob-download.mjs
 import { getInventoryStore, bad } from "./_blob-common.mjs";
 
 export async function handler(event) {
@@ -7,9 +8,7 @@ export async function handler(event) {
 
   try {
     const store = getInventoryStore();
-
-    // Read as plain text (CSV). Simple, robust in Netlify Functions.
-    const text = await store.get(key, { type: "text" });
+    const text = await store.get(key, { type: "text" }); // simple & robust
     if (text == null) return bad(`Not found: ${key}`, 404);
 
     return {
@@ -18,8 +17,8 @@ export async function handler(event) {
         "content-type": "text/csv; charset=utf-8",
         "content-disposition": `inline; filename="${key.split("/").pop()}"`,
       },
-      body: text,                // <-- return CSV text
-      isBase64Encoded: false,    // <-- plain text response
+      body: text,
+      isBase64Encoded: false,
     };
   } catch (e) {
     return bad(`Download error: ${e?.message || e}`, 500);
