@@ -26,7 +26,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 
 /* ─────────────────────────────
-   Helpers & Column Detection
+   Parsing, Normalization, Columns
    ───────────────────────────── */
 
 const toNumber = (v) => {
@@ -89,7 +89,7 @@ function normCode(v) {
   let s = String(v ?? "");
   s = s.replace(/\uFEFF/g, ""); // strip BOM
   s = s.trim();
-  s = s.replace(/\s+/g, ""); // remove internal spaces
+  s = s.replace(/\s+/g, "");   // remove internal spaces
   s = s.replace(/[^\w-]/g, ""); // keep letters/numbers/_/-
   return s;
 }
@@ -233,7 +233,34 @@ async function nfGetJSON(key) {
 }
 
 /* ─────────────────────────────
-   Main Component (single export)
+   Scans key helpers (multi-location support)
+   ───────────────────────────── */
+
+// Canonical scans key (keeps prefix if present, avoids leading slash)
+const scansKeyFor = (fileKey) => {
+  const parts = String(fileKey || "").split("/");
+  const base = (parts.pop() || "file").replace(/\.[^.]+$/, "");
+  const prefix = parts.join("/");
+  return `${prefix ? prefix + "/" : ""}scans/${base}.json`;
+};
+
+// Generate all plausible locations where scans may live
+const scanKeyCandidates = (fileKey, namespace) => {
+  const parts = String(fileKey || "").split("/");
+  const filename = parts.pop() || "file.csv";
+  const base = filename.replace(/\.[^.]+$/, "");
+  const prefix = parts.join("/"); // "" or like "default"
+
+  const primary = scansKeyFor(fileKey);              // "<prefix>/scans/<base>.json" or "scans/<base>.json"
+  const root    = `scans/${base}.json`;              // "scans/<base>.json"
+  const nsRoot  = `${namespace}/scans/${base}.json`; // "<ns>/scans/<base>.json"
+  const scansNs = `scans/${namespace}/${base}.json`; // "scans/<ns>/<base>.json" (early variant)
+
+  return Array.from(new Set([primary, nsRoot, root, scansNs]));
+};
+
+/* ─────────────────────────────
+   Main Component
    ───────────────────────────── */
 
 export default function InventoryScannerApp() {
@@ -262,7 +289,7 @@ export default function InventoryScannerApp() {
     return m;
   }, [rows, cols]);
 
-  // Scans & UI state
+  // Scans & UI
   const [diffs, setDiffs] = useState([]); // persisted per-file
   const [active, setActive] = useState(null);
   const [actualQty, setActualQty] = useState("");
@@ -315,15 +342,6 @@ export default function InventoryScannerApp() {
     }
   };
 
-// JSON location for scans alongside the selected CSV
-const scansKeyFor = (fileKey) => {
-  const parts = String(fileKey || "").split("/");
-  const base = (parts.pop() || "file").replace(/\.[^.]+$/, ""); // filename without extension
-  const prefix = parts.join("/"); // may be ""
-  // ✅ no accidental leading slash when there is no prefix
-  return `${prefix ? prefix + "/" : ""}scans/${base}.json`;
-};
-
   // Robust CSV parsing with base64 auto-decode + multiple strategies
   const loadCSVFromCloud = async (key) => {
     setCloudBusy(true);
@@ -340,7 +358,6 @@ const scansKeyFor = (fileKey) => {
         setDiffs([]);
         setNotFound("");
         setError(result.reason || "Failed to parse CSV");
-        console.warn("CSV parse failed. Debug:", result);
         return;
       }
 
@@ -349,7 +366,6 @@ const scansKeyFor = (fileKey) => {
       setDiffs([]); // replaced by saved scans load
       setNotFound("");
       setError("");
-      // console.log("CSV parsed via strategy:", result.strategy, "Headers:", result.headers);
     } catch (e) {
       setError(e.message || "Load failed");
     } finally {
@@ -357,44 +373,31 @@ const scansKeyFor = (fileKey) => {
     }
   };
 
-const loadScansForActive = async (fileKey) => {
-  // canonical
-  const primary = scansKeyFor(fileKey);
+  const loadScansForActive = async (fileKey) => {
+    const candidates = scanKeyCandidates(fileKey, namespace);
 
-  // fallbacks for older saves you might have:
-  // - at repo root: "scans/<base>.json" (when there was no namespace/prefix)
-  // - under explicit namespace folder (if a function used namespace directly)
-  const parts = String(fileKey || "").split("/");
-  const filename = (parts.pop() || "file");
-  const base = filename.replace(/\.[^.]+$/, "");
-  const namespaceFolder = parts[0] || ""; // e.g. "default"
-  const fallbackRoot = `scans/${base}.json`;
-  const fallbackNs = namespaceFolder ? `${namespaceFolder}/scans/${base}.json` : fallbackRoot;
+    for (const key of candidates) {
+      try {
+        const res = await nfGetJSON(key);
+        const arr =
+          (res && Array.isArray(res.diffs) && res.diffs) ||
+          (res && res.data && Array.isArray(res.data.diffs) && res.data.diffs) ||
+          null;
 
-  const candidates = Array.from(new Set([primary, fallbackNs, fallbackRoot]));
-
-  // try in order until one works
-  for (const key of candidates) {
-    try {
-      const res = await nfGetJSON(key);
-      if (res && Array.isArray(res.diffs)) {
-        setDiffs(res.diffs);
-        lastSavedRef.current = JSON.stringify({ diffs: res.diffs });
-        return;
-      } else if (res && res.data && Array.isArray(res.data.diffs)) {
-        setDiffs(res.data.diffs);
-        lastSavedRef.current = JSON.stringify({ diffs: res.data.diffs });
-        return;
+        if (arr) {
+          setDiffs(arr);
+          lastSavedRef.current = JSON.stringify({ diffs: arr });
+          return;
+        }
+      } catch {
+        // try next
       }
-    } catch {
-      // keep trying next candidate
     }
-  }
 
-  // nothing found — start fresh
-  setDiffs([]);
-  lastSavedRef.current = JSON.stringify({ diffs: [] });
-};
+    // nothing found
+    setDiffs([]);
+    lastSavedRef.current = JSON.stringify({ diffs: [] });
+  };
 
   const handleChooseCloudFile = async (key) => {
     setActiveKey(key);
@@ -403,7 +406,7 @@ const loadScansForActive = async (fileKey) => {
     barcodeRef.current?.focus();
   };
 
-  // Debounced auto-save of scans
+  // Debounced auto-save of scans — save to ALL plausible locations
   useEffect(() => {
     if (!activeKey) return;
     const payload = JSON.stringify({ diffs });
@@ -414,7 +417,8 @@ const loadScansForActive = async (fileKey) => {
       if (cancelled) return;
       try {
         setSaving(true);
-        await nfPutJSON(scansKeyFor(activeKey), { diffs });
+        const keys = scanKeyCandidates(activeKey, namespace);
+        await Promise.allSettled(keys.map((k) => nfPutJSON(k, { diffs })));
         lastSavedRef.current = payload;
       } catch (e) {
         console.warn("Save JSON failed:", e);
@@ -427,7 +431,7 @@ const loadScansForActive = async (fileKey) => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [activeKey, diffs]);
+  }, [activeKey, diffs, namespace]);
 
   // Scanning & actions
   const onBarcodeScan = (e) => {
@@ -536,7 +540,9 @@ const loadScansForActive = async (fileKey) => {
     URL.revokeObjectURL(url);
   };
 
-  /* UI (mobile-first) */
+  /* ─────────────────────────────
+     UI (mobile-first responsive)
+     ───────────────────────────── */
   return (
     <div className="min-h-screen w-full bg-gray-50 p-3 sm:p-4 md:p-8">
       <div className="mx-auto max-w-6xl space-y-4 sm:space-y-6">
