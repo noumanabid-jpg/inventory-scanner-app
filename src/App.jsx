@@ -34,6 +34,44 @@ const toNumber = (v) => {
   return Number.isFinite(n) ? n : 0;
 };
 
+// Try multiple CSV parsing strategies until we get rows
+function parseCSVSmart(text) {
+  if (!text || !text.trim()) {
+    return { rows: [], headers: [], reason: "CSV text is empty" };
+  }
+
+  const sanitize = (s) => s?.replace(/\uFEFF/g, ""); // strip BOM
+
+  const strategies = [
+    { name: "auto", opts: { header: true, skipEmptyLines: "greedy", delimitersToGuess: [",", "\t", ";", "|"] } },
+    { name: "comma", opts: { header: true, skipEmptyLines: "greedy", delimiter: "," } },
+    { name: "tab", opts: { header: true, skipEmptyLines: "greedy", delimiter: "\t" } },
+    { name: "semicolon", opts: { header: true, skipEmptyLines: "greedy", delimiter: ";" } },
+    { name: "pipe", opts: { header: true, skipEmptyLines: "greedy", delimiter: "|" } },
+  ];
+
+  for (const s of strategies) {
+    let parsed;
+    try {
+      parsed = Papa.parse(sanitize(text), {
+        ...s.opts,
+        transformHeader: (h) => sanitize(String(h || "").trim()),
+        worker: false,
+      });
+    } catch {
+      continue;
+    }
+    const data = Array.isArray(parsed?.data) ? parsed.data : [];
+    if (data.length > 0) {
+      const headers = Object.keys(data[0] || {});
+      return { rows: data, headers, reason: null, strategy: s.name };
+    }
+  }
+
+  const firstLine = sanitize(text).split(/\r?\n/)[0]?.slice(0, 200) || "";
+  return { rows: [], headers: [], reason: `No rows parsed. First line: "${firstLine}"` };
+}
+
 function mapColumns(headers) {
   const raw = Array.isArray(headers) ? headers : [];
 
@@ -93,8 +131,6 @@ function mapColumns(headers) {
       "availablequantity",
       "available(noteditable)",
       "onhand(new)",
-      "onhandnew",
-      "onhandnew",
     ]),
 
     // optional
@@ -132,14 +168,14 @@ async function nfList(ns) {
     throw new Error(`List failed: ${res.status}${msg ? ` – ${msg}` : ""}`);
   }
   const out = await res.json();
-  // normalize
+  // normalize + client guard to .csv
   const files = (out.files || [])
     .map((f) => ({
       key: f.key || f.name || f.id,
       size: f.size ?? f.bytes ?? null,
       uploadedAt: f.uploadedAt || f.uploaded_at || null,
     }))
-    .filter((f) => f.key && /\.csv$/i.test(f.key)); // client-side guard: only CSVs
+    .filter((f) => f.key && /\.csv$/i.test(f.key));
   return { ...out, files };
 }
 
@@ -173,14 +209,15 @@ async function nfUpload(ns, file) {
   return res.json();
 }
 
+// NOTE: your Netlify function `blob-download.mjs` must return *plain text*.
+// (We then wrap it as a Blob locally to feed Papa.parse.)
 async function nfDownload(key) {
   const res = await fetch(`/.netlify/functions/blob-download?key=${encodeURIComponent(key)}`);
   if (!res.ok) {
     const msg = await res.text().catch(() => "");
     throw new Error(`Download failed: ${res.status}${msg ? ` – ${msg}` : ""}`);
   }
-  // server returns plain CSV text
-  const text = await res.text();
+  const text = await res.text(); // CSV as text
   return new Blob([text], { type: "text/csv; charset=utf-8" });
 }
 
@@ -293,37 +330,31 @@ export default function InventoryScannerApp() {
     return `${prefix}/scans/${base}.json`;
   };
 
-  // Robust CSV parsing
+  // Robust CSV parsing with multiple strategies
   const loadCSVFromCloud = async (key) => {
     setCloudBusy(true);
     try {
       const blob = await nfDownload(key);
       const text = await blob.text();
 
-      if (!text || !text.trim()) {
+      const result = parseCSVSmart(text);
+
+      if (!result.rows.length) {
         setRows([]);
-        setError("Downloaded CSV is empty.");
+        setFileName(key.split("/").pop());
+        setDiffs([]);
+        setNotFound("");
+        setError(result.reason || "Failed to parse CSV");
+        console.warn("CSV parse failed. Debug:", result);
         return;
       }
 
-      Papa.parse(text, {
-        header: true,
-        skipEmptyLines: "greedy",
-        delimitersToGuess: [",", "\t", ";", "|"],
-        transformHeader: (h) => h?.replace(/\uFEFF/g, "").trim(),
-        worker: false,
-        complete: (res) => {
-          const data = Array.isArray(res.data) ? res.data : [];
-          setRows(data);
-          setFileName(key.split("/").pop());
-          setDiffs([]); // will be replaced by saved scans load
-          setNotFound("");
-          try {
-            console.log("CSV rows:", data.length, "Headers:", Object.keys(data[0] || {}));
-          } catch {}
-        },
-        error: (err) => setError(err?.message || "Failed to parse CSV"),
-      });
+      setRows(result.rows);
+      setFileName(key.split("/").pop());
+      setDiffs([]); // will be replaced by saved scans load
+      setNotFound("");
+      setError("");
+      console.log("CSV parsed via strategy:", result.strategy, "Headers:", result.headers);
     } catch (e) {
       setError(e.message || "Load failed");
     } finally {
@@ -591,7 +622,7 @@ export default function InventoryScannerApp() {
                     ref={barcodeRef}
                     placeholder="Focus here and scan barcode..."
                     onKeyDown={onBarcodeScan}
-                    disabled={!cols} // enable when required columns are detected
+                    disabled={!cols} // enable once required columns are detected
                   />
                   <Button
                     variant="outline"
@@ -605,17 +636,16 @@ export default function InventoryScannerApp() {
 
                 {rows.length > 0 && (
                   <p className="text-xs text-gray-600">
-                    Loaded <strong>{rows.length}</strong> rows.
+                    Loaded <strong>{rows.length}</strong> rows.&nbsp;
                     {cols ? (
                       <>
-                        {" "}
                         Detected: <strong>Barcode</strong>, <strong>Name</strong>,{" "}
                         <strong>On Hand</strong>
                         {cols.reserved ? ", " : ""}
                         {cols.reserved ? <strong>Reserved</strong> : null}.
                       </>
                     ) : (
-                      <> Couldn’t find required headers in the CSV.</>
+                      <>Couldn’t find required headers in the CSV.</>
                     )}
                   </p>
                 )}
