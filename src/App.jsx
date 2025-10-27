@@ -687,34 +687,41 @@ export default function InventoryScannerApp() {
             <CardContent className="space-y-3 sm:space-y-4">
               <div className="grid gap-3 sm:gap-4 md:grid-cols-3">
                 <div className="space-y-2">
-                  <Label htmlFor="ns" className="text-xs sm:text-sm">Namespace</Label>
-                  <Input
-                    id="ns"
-                    value={namespace}
-                    onChange={(e) => setNamespace(e.target.value)}
-                    placeholder="e.g., default or jeddah-warehouse"
-                  />
-                  <div className="flex flex-wrap gap-2">
-                    <Button variant="outline" onClick={refreshCloudList} disabled={cloudBusy} className="flex-1 sm:flex-none">
-                      Refresh
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      onClick={() => document.getElementById("hiddenUpload").click()}
-                      disabled={cloudBusy}
-                      className="flex-1 sm:flex-none"
-                    >
-                      Upload
-                    </Button>
-                    <input
-                      id="hiddenUpload"
-                      type="file"
-                      accept=".csv"
-                      className="hidden"
-                      onChange={(e) => handleCloudUploadThenLoad(e.target.files?.[0])}
-                    />
-                  </div>
-                </div>
+  <Label htmlFor="ns" className="text-xs sm:text-sm">Namespace</Label>
+
+  {/* ▼ dropdown instead of free text */}
+  <select
+    id="ns"
+    className="w-full border rounded-xl p-2 text-sm"
+    value={namespace}
+    onChange={(e) => setNamespace(e.target.value)}
+  >
+    <option value="Jeddah">Jeddah</option>
+    <option value="Riyadh">Riyadh</option>
+    <option value="Dammam">Dammam</option>
+  </select>
+
+  <div className="flex flex-wrap gap-2">
+    <Button variant="outline" onClick={refreshCloudList} disabled={cloudBusy} className="flex-1 sm:flex-none">
+      Refresh
+    </Button>
+    <Button
+      variant="secondary"
+      onClick={() => document.getElementById("hiddenUpload").click()}
+      disabled={cloudBusy}
+      className="flex-1 sm:flex-none"
+    >
+      Upload
+    </Button>
+    <input
+      id="hiddenUpload"
+      type="file"
+      accept=".csv"
+      className="hidden"
+      onChange={(e) => handleCloudUploadThenLoad(e.target.files?.[0])}
+    />
+  </div>
+</div>
 
                 <div className="md:col-span-2 space-y-2">
                   <Label className="text-xs sm:text-sm">Select Cloud File</Label>
@@ -842,20 +849,6 @@ export default function InventoryScannerApp() {
           </div>
         </section>
       </div>
-
-      {/* Mobile bottom bar for quick actions (shows after a file is loaded) */}
-      {rows.length > 0 && (
-        <div className="fixed bottom-3 inset-x-3 md:hidden">
-          <div className="rounded-2xl shadow-lg border bg-white p-3 flex gap-2">
-            <Button className="flex-1" onClick={exportDifferencesCSV} disabled={!diffs.length}>
-              Diff CSV
-            </Button>
-            <Button variant="secondary" className="flex-1" onClick={exportAllScansCSV} disabled={!diffs.length}>
-              All Scans
-            </Button>
-          </div>
-        </div>
-      )}
 
       {/* Modal to confirm actual qty */}
       <Dialog open={!!active} onOpenChange={(open) => !open && setActive(null)}>
