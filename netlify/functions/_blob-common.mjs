@@ -3,8 +3,22 @@ import { getStore } from "@netlify/blobs";
 const STORE = "inventory";
 
 export function getInventoryStore() {
-  // On live Netlify, credentials are injected automatically.
-  return getStore({ name: STORE });
+  const opts = { name: STORE };
+
+  // If PAT + Site ID are present, force manual mode (works anywhere, including live)
+  const siteID = process.env.NETLIFY_SITE_ID || process.env.SITE_ID;
+  const token =
+    process.env.NETLIFY_ACCESS_TOKEN ||
+    process.env.NETLIFY_API_TOKEN ||
+    process.env.TOKEN;
+
+  if (siteID && token) {
+    opts.siteID = siteID;
+    opts.token = token;
+  }
+
+  // Otherwise, fall back to platform-injected credentials
+  return getStore(opts);
 }
 
 export function json(res, status = 200) {
