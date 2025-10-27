@@ -101,9 +101,12 @@ async function nfUpload(ns, file) {
 
 async function nfDownload(key) {
   const res = await fetch(`/.netlify/functions/blob-download?key=${encodeURIComponent(key)}`);
-  if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+  if (!res.ok) {
+    const msg = await res.text().catch(() => "");
+    throw new Error(`Download failed: ${res.status}${msg ? ` – ${msg}` : ""}`);
+  }
   const b64 = await res.text();
-  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
   return new Blob([bytes], { type: "text/csv" });
 }
 
