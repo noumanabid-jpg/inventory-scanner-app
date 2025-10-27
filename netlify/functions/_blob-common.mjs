@@ -1,27 +1,41 @@
-import { getInventoryStore, bad } from "./_blob-common.mjs";
+import { getStore } from "@netlify/blobs";
 
-export async function handler(event) {
-  if (event.httpMethod !== "GET") return bad("Use GET", 405);
-  const key = event.queryStringParameters?.key;
-  if (!key) return bad("Missing key", 400);
+const STORE = "inventory";
 
-  try {
-    const store = getInventoryStore();
-    // Get as raw bytes (Uint8Array) instead of stream to avoid edge/runtime issues
-    const bytes = await store.get(key, { type: "bytes" });
-    if (!bytes || !bytes.length) return bad(`Not found or empty: ${key}`, 404);
+/**
+ * Uses Netlify platform credentials by default.
+ * If NETLIFY_SITE_ID + NETLIFY_ACCESS_TOKEN are present, switches to manual mode.
+ */
+export function getInventoryStore() {
+  const opts = { name: STORE };
 
-    const base64 = Buffer.from(bytes).toString("base64");
-    return {
-      statusCode: 200,
-      headers: {
-        "content-type": "text/csv",
-        "content-disposition": `inline; filename="${key.split("/").pop()}"`,
-      },
-      body: base64,
-      isBase64Encoded: true,
-    };
-  } catch (e) {
-    return bad(`Download error: ${e?.message || e}`, 500);
+  const siteID =
+    process.env.NETLIFY_SITE_ID || process.env.SITE_ID || "";
+  const token =
+    process.env.NETLIFY_ACCESS_TOKEN ||
+    process.env.NETLIFY_API_TOKEN ||
+    process.env.TOKEN ||
+    "";
+
+  if (siteID && token) {
+    opts.siteID = siteID;
+    opts.token = token;
   }
+
+  return getStore(opts);
+}
+
+export function json(res, status = 200) {
+  return {
+    statusCode: status,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(res),
+  };
+}
+
+export function bad(res, status = 400) {
+  return json(
+    { error: typeof res === "string" ? res : "Bad Request", detail: res },
+    status
+  );
 }
