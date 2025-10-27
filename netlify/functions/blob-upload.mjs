@@ -1,3 +1,4 @@
+// netlify/functions/blob-upload.mjs
 import { getInventoryStore, json, bad } from "./_blob-common.mjs";
 
 function sanitizeName(s = "file.csv") {
