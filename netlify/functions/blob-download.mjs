@@ -8,23 +8,23 @@ export async function handler(event) {
 
   try {
     const store = getInventoryStore();
-    const blob = await store.get(key);
-    if (!blob) return bad("Not found", 404);
 
-    // Explicitly treat CSV as text
-    const type = /\.csv$/i.test(key)
-      ? "text/csv; charset=utf-8"
-      : "application/octet-stream";
+    // ✅ Ask Netlify Blobs to give us text directly
+    const text = await store.get(key, { type: "text" });
+    if (text == null) return bad(`Not found: ${key}`, 404);
 
     return {
       statusCode: 200,
       headers: {
-        "Content-Type": type,
-        "Access-Control-Allow-Origin": "*",
+        "content-type": /\.csv$/i.test(key)
+          ? "text/csv; charset=utf-8"
+          : "text/plain; charset=utf-8",
+        "access-control-allow-origin": "*",
       },
-      body: await blob.text(), // ✅ always convert to text
+      body: text,            // plain CSV text
+      isBase64Encoded: false // important: not base64
     };
   } catch (e) {
-    return bad(`Download error: ${e.message || e}`, 500);
+    return bad(`Download error: ${e?.message || e}`, 500);
   }
 }
