@@ -6,16 +6,17 @@ export async function handler(event) {
   const ns = event.queryStringParameters?.ns || "default";
   try {
     const store = getInventoryStore();
-    const out = await store.list({ prefix: `${ns}/` });
-
-    // Support different SDK shapes
+    // use prefix without forced trailing slash (catches both ns and ns/)
+    const out = await store.list({ prefix: ns });
     const files = out?.objects || out?.blobs || [];
-    // Normalize to { key, size, uploadedAt? }
-    const normalized = files.map(f => ({
-      key: f.key || f.name || f.id,         // typical: f.key
-      size: f.size ?? f.bytes ?? null,
-      uploadedAt: f.uploadedAt || f.uploaded_at || null,
-    })).filter(f => f.key); // keep only valid keys
+
+    const normalized = files
+      .map((f) => ({
+        key: f.key || f.name || f.id,
+        size: f.size ?? f.bytes ?? null,
+        uploadedAt: f.uploadedAt || f.uploaded_at || null,
+      }))
+      .filter((f) => f.key);
 
     return json({ ok: true, ns, files: normalized });
   } catch (e) {
