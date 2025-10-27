@@ -181,6 +181,22 @@ async function nfList(ns) {
   return { ...out, files };
 }
 
+// List ALL blobs (used to discover existing scans JSON)
+async function nfListAll(ns) {
+  const res = await fetch(`/.netlify/functions/blob-list?ns=${encodeURIComponent(ns)}`);
+  if (!res.ok) {
+    const msg = await res.text().catch(() => "");
+    throw new Error(`List-all failed: ${res.status}${msg ? ` – ${msg}` : ""}`);
+  }
+  const out = await res.json();
+  const files = (out.files || []).map((f) => ({
+    key: f.key || f.name || f.id,
+    size: f.size ?? f.bytes ?? null,
+    uploadedAt: f.uploadedAt || f.uploaded_at || null,
+  }));
+  return { ...out, files };
+}
+
 // Convert ArrayBuffer -> base64 in chunks (avoids call-stack overflow)
 function bufferToBase64(arrayBuffer) {
   const bytes = new Uint8Array(arrayBuffer);
@@ -297,6 +313,7 @@ export default function InventoryScannerApp() {
   const [saving, setSaving] = useState(false);
   const barcodeRef = useRef(null);
   const lastSavedRef = useRef("");
+  const resolvedScansKeyRef = useRef(""); // where scans were found/saved for current file
 
   useEffect(() => {
     const t = setTimeout(() => barcodeRef.current?.focus(), 200);
@@ -373,10 +390,11 @@ export default function InventoryScannerApp() {
     }
   };
 
+  // Load scans: quick candidates → search all blobs → else set canonical
   const loadScansForActive = async (fileKey) => {
-    const candidates = scanKeyCandidates(fileKey, namespace);
+    const quickCandidates = scanKeyCandidates(fileKey, namespace);
 
-    for (const key of candidates) {
+    for (const key of quickCandidates) {
       try {
         const res = await nfGetJSON(key);
         const arr =
@@ -387,16 +405,66 @@ export default function InventoryScannerApp() {
         if (arr) {
           setDiffs(arr);
           lastSavedRef.current = JSON.stringify({ diffs: arr });
+          resolvedScansKeyRef.current = key; // remember where we found it
+          try { console.log("Loaded scans from:", key); } catch {}
           return;
         }
       } catch {
-        // try next
+        // keep trying
       }
     }
 
-    // nothing found
+    // if not found, search all blobs for any scans/<base>.json variants
+    try {
+      const parts = String(fileKey || "").split("/");
+      const filename = parts.pop() || "file.csv";
+      const base = filename.replace(/\.[^.]+$/, "");
+      const targetSuffix = `/scans/${base}.json`;
+
+      const all = await nfListAll(namespace);
+      const candidates = (all.files || [])
+        .filter((f) => {
+          const k = String(f.key || "");
+          return (
+            k.endsWith(targetSuffix) ||
+            k === `scans/${base}.json` ||
+            k === `${namespace}/scans/${base}.json` ||
+            k === `scans/${namespace}/${base}.json`
+          );
+        })
+        .sort((a, b) => {
+          const ta = a.uploadedAt ? new Date(a.uploadedAt).getTime() : 0;
+          const tb = b.uploadedAt ? new Date(b.uploadedAt).getTime() : 0;
+          return tb - ta;
+        });
+
+      for (const f of candidates) {
+        try {
+          const res = await nfGetJSON(f.key);
+          const arr =
+            (res && Array.isArray(res.diffs) && res.diffs) ||
+            (res && res.data && Array.isArray(res.data.diffs) && res.data.diffs) ||
+            null;
+          if (arr) {
+            setDiffs(arr);
+            lastSavedRef.current = JSON.stringify({ diffs: arr });
+            resolvedScansKeyRef.current = f.key; // lock discovered key
+            try { console.log("Loaded scans (discovered) from:", f.key); } catch {}
+            return;
+          }
+        } catch {
+          // try next
+        }
+      }
+    } catch (e) {
+      try { console.warn("Search for scans failed:", e); } catch {}
+    }
+
+    // nothing found — start fresh and pick canonical for future saves
     setDiffs([]);
     lastSavedRef.current = JSON.stringify({ diffs: [] });
+    resolvedScansKeyRef.current = scansKeyFor(fileKey);
+    try { console.log("No saved scans found. Will use:", resolvedScansKeyRef.current); } catch {}
   };
 
   const handleChooseCloudFile = async (key) => {
@@ -406,7 +474,7 @@ export default function InventoryScannerApp() {
     barcodeRef.current?.focus();
   };
 
-  // Debounced auto-save of scans — save to ALL plausible locations
+  // Debounced auto-save of scans — save to resolved key first, mirror to others
   useEffect(() => {
     if (!activeKey) return;
     const payload = JSON.stringify({ diffs });
@@ -417,9 +485,16 @@ export default function InventoryScannerApp() {
       if (cancelled) return;
       try {
         setSaving(true);
-        const keys = scanKeyCandidates(activeKey, namespace);
-        await Promise.allSettled(keys.map((k) => nfPutJSON(k, { diffs })));
+        const allKeys = scanKeyCandidates(activeKey, namespace);
+        const primary = resolvedScansKeyRef.current || allKeys[0];
+        const others = allKeys.filter((k) => k !== primary);
+
+        await nfPutJSON(primary, { diffs }); // write main
+        await Promise.allSettled(others.map((k) => nfPutJSON(k, { diffs }))); // mirror
+
         lastSavedRef.current = payload;
+        resolvedScansKeyRef.current = primary;
+        try { console.log("Saved scans to:", [primary, ...others]); } catch {}
       } catch (e) {
         console.warn("Save JSON failed:", e);
       } finally {
