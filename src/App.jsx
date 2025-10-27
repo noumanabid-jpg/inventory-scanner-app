@@ -67,8 +67,18 @@ function useColumns(rows) {
    ============================ */
 async function nfList(ns) {
   const res = await fetch(`/.netlify/functions/blob-list?ns=${encodeURIComponent(ns)}`);
-  if (!res.ok) throw new Error(`List failed: ${res.status}`);
-  return res.json();
+  if (!res.ok) {
+    const msg = await res.text().catch(() => "");
+    throw new Error(`List failed: ${res.status}${msg ? ` – ${msg}` : ""}`);
+  }
+  const out = await res.json();
+  // Normalize in case the function returns either {objects} or {blobs}
+  const files = (out.files || []).map((f) => ({
+    key: f.key || f.name || f.id,
+    size: f.size ?? f.bytes ?? null,
+    uploadedAt: f.uploadedAt || f.uploaded_at || null,
+  })).filter((f) => f.key);
+  return { ...out, files };
 }
 
 // Convert ArrayBuffer -> base64 safely (chunked; avoids call stack overflow)
@@ -86,7 +96,7 @@ function bufferToBase64(arrayBuffer) {
 async function nfUpload(ns, file) {
   const url = `/.netlify/functions/blob-upload?ns=${encodeURIComponent(ns)}&name=${encodeURIComponent(file.name)}`;
   const buf = await file.arrayBuffer();
-  const b64 = bufferToBase64(buf); // keep the chunked encoder you already added
+  const b64 = bufferToBase64(buf); // safe for large files
   const res = await fetch(url, {
     method: "POST",
     body: b64,
@@ -105,9 +115,9 @@ async function nfDownload(key) {
     const msg = await res.text().catch(() => "");
     throw new Error(`Download failed: ${res.status}${msg ? ` – ${msg}` : ""}`);
   }
-  const b64 = await res.text();
-  const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-  return new Blob([bytes], { type: "text/csv" });
+  // Server returns plain CSV text now (no base64)
+  const text = await res.text();
+  return new Blob([text], { type: "text/csv; charset=utf-8" });
 }
 
 async function nfPutJSON(key, data) {
@@ -173,11 +183,14 @@ export default function InventoryScannerApp() {
     setCloudBusy(true);
     try {
       const out = await nfList(namespace);
-      setCloudFiles(
-        (out.files || []).sort((a, b) =>
-          (b.uploadedAt || "").localeCompare(a.uploadedAt || "")
-        )
-      );
+      const arr = out.files || [];
+      arr.sort((a, b) => {
+        const ta = a.uploadedAt ? new Date(a.uploadedAt).getTime() : 0;
+        const tb = b.uploadedAt ? new Date(b.uploadedAt).getTime() : 0;
+        if (tb !== ta) return tb - ta; // newest timestamp first
+        return (b.key || "").localeCompare(a.key || ""); // fallback by key
+      });
+      setCloudFiles(arr);
     } catch (e) {
       setError(e.message || "Failed to list");
     } finally {
@@ -190,9 +203,11 @@ export default function InventoryScannerApp() {
     setCloudBusy(true);
     try {
       const up = await nfUpload(namespace, file);
+      // Show it immediately without waiting for eventual consistency
+      setCloudFiles((prev) => [{ key: up.key, uploadedAt: new Date().toISOString() }, ...prev]);
+      await handleChooseCloudFile(up.key); // will download + parse + load scans
+      // Also refresh the list in background to catch others
       await refreshCloudList();
-      // Load the uploaded file from the cloud (not from local)
-      await handleChooseCloudFile(up.key);
     } catch (e) {
       setError(e.message || "Upload+Load failed");
     } finally {
@@ -473,8 +488,8 @@ export default function InventoryScannerApp() {
                     <option value="">Choose...</option>
                     {cloudFiles.map((f) => (
                       <option key={f.key} value={f.key}>
-                        {f.key.split("/").pop()} —{" "}
-                        {f.uploadedAt ? new Date(f.uploadedAt).toLocaleString() : "-"}
+                        {f.key.split("/").pop()}
+                        {f.uploadedAt ? ` — ${new Date(f.uploadedAt).toLocaleString()}` : ""}
                       </option>
                     ))}
                   </select>
