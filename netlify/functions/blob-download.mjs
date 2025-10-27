@@ -8,19 +8,18 @@ export async function handler(event) {
   try {
     const store = getInventoryStore();
 
-    // Use Node Buffer for maximum compatibility in Netlify Functions
-    const buf = await store.get(key, { type: "buffer" });
-    if (!buf || buf.length === 0) return bad(`Not found or empty: ${key}`, 404);
+    // Read as plain text (CSV). Simple, robust in Netlify Functions.
+    const text = await store.get(key, { type: "text" });
+    if (text == null) return bad(`Not found: ${key}`, 404);
 
-    const base64 = buf.toString("base64");
     return {
       statusCode: 200,
       headers: {
-        "content-type": "text/csv",
+        "content-type": "text/csv; charset=utf-8",
         "content-disposition": `inline; filename="${key.split("/").pop()}"`,
       },
-      body: base64,
-      isBase64Encoded: true,
+      body: text,                // <-- return CSV text
+      isBase64Encoded: false,    // <-- plain text response
     };
   } catch (e) {
     return bad(`Download error: ${e?.message || e}`, 500);
