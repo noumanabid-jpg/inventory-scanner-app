@@ -165,7 +165,7 @@ function useColumns(rows) {
    ───────────────────────────── */
 
 async function nfList(ns) {
-  const res = await fetch(`/.netlify/functions/blob-list?ns=${encodeURIComponent(ns)}`);
+  const res = await fetch(`/.netlify/functions/blob-list?ns=${encodeURIComponent(ns)}&ts=${Date.now()}`);
   if (!res.ok) {
     const msg = await res.text().catch(() => "");
     throw new Error(`List failed: ${res.status}${msg ? ` – ${msg}` : ""}`);
@@ -183,7 +183,7 @@ async function nfList(ns) {
 
 // List ALL blobs (used to discover existing scans JSON)
 async function nfListAll(ns) {
-  const res = await fetch(`/.netlify/functions/blob-list?ns=${encodeURIComponent(ns)}`);
+  const res = await fetch(`/.netlify/functions/blob-list?ns=${encodeURIComponent(ns)}&ts=${Date.now()}`);
   if (!res.ok) {
     const msg = await res.text().catch(() => "");
     throw new Error(`List-all failed: ${res.status}${msg ? ` – ${msg}` : ""}`);
@@ -223,7 +223,7 @@ async function nfUpload(ns, file) {
 
 // Server may return plain CSV text or base64 string → we handle both.
 async function nfDownload(key) {
-  const res = await fetch(`/.netlify/functions/blob-download?key=${encodeURIComponent(key)}`);
+  const res = await fetch(`/.netlify/functions/blob-download?key=${encodeURIComponent(key)}&ts=${Date.now()}`);
   if (!res.ok) {
     const msg = await res.text().catch(() => "");
     throw new Error(`Download failed: ${res.status}${msg ? ` – ${msg}` : ""}`);
@@ -243,7 +243,7 @@ async function nfPutJSON(key, data) {
 }
 
 async function nfGetJSON(key) {
-  const res = await fetch(`/.netlify/functions/blob-get-json?key=${encodeURIComponent(key)}`);
+  const res = await fetch(`/.netlify/functions/blob-get-json?key=${encodeURIComponent(key)}&ts=${Date.now()}`);
   if (!res.ok) throw new Error(`Get JSON failed: ${res.status}`);
   return res.json();
 }
@@ -474,7 +474,7 @@ export default function InventoryScannerApp() {
     barcodeRef.current?.focus();
   };
 
-  // Debounced auto-save of scans — save to resolved key first, mirror to others
+  // Debounced auto-save of scans — save to resolved key first, mirror to others, then verify
   useEffect(() => {
     if (!activeKey) return;
     const payload = JSON.stringify({ diffs });
@@ -491,6 +491,18 @@ export default function InventoryScannerApp() {
 
         await nfPutJSON(primary, { diffs }); // write main
         await Promise.allSettled(others.map((k) => nfPutJSON(k, { diffs }))); // mirror
+
+        // Read-after-write verify (bust cache too via nfGetJSON)
+        try {
+          const verify = await nfGetJSON(primary);
+          const arr =
+            (verify && Array.isArray(verify.diffs) && verify.diffs) ||
+            (verify && verify.data && Array.isArray(verify.data.diffs) && verify.data.diffs) ||
+            [];
+          console.log("Verified saved count:", arr.length, "at", primary);
+        } catch (e) {
+          console.warn("Post-save verify failed:", e);
+        }
 
         lastSavedRef.current = payload;
         resolvedScansKeyRef.current = primary;
