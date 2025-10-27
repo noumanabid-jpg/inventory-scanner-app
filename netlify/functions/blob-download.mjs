@@ -8,19 +8,23 @@ export async function handler(event) {
 
   try {
     const store = getInventoryStore();
-    const text = await store.get(key, { type: "text" }); // simple & robust
-    if (text == null) return bad(`Not found: ${key}`, 404);
+    const blob = await store.get(key);
+    if (!blob) return bad("Not found", 404);
+
+    // Explicitly treat CSV as text
+    const type = /\.csv$/i.test(key)
+      ? "text/csv; charset=utf-8"
+      : "application/octet-stream";
 
     return {
       statusCode: 200,
       headers: {
-        "content-type": "text/csv; charset=utf-8",
-        "content-disposition": `inline; filename="${key.split("/").pop()}"`,
+        "Content-Type": type,
+        "Access-Control-Allow-Origin": "*",
       },
-      body: text,
-      isBase64Encoded: false,
+      body: await blob.text(), // ✅ always convert to text
     };
   } catch (e) {
-    return bad(`Download error: ${e?.message || e}`, 500);
+    return bad(`Download error: ${e.message || e}`, 500);
   }
 }
