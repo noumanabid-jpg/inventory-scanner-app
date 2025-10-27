@@ -198,30 +198,41 @@ export default function InventoryScannerApp() {
     }
   };
 
-  const handleCloudUploadThenLoad = async (file) => {
-    if (!file) return;
-    setCloudBusy(true);
-    try {
-      const up = await nfUpload(namespace, file);
-      // Show it immediately without waiting for eventual consistency
-      setCloudFiles((prev) => [{ key: up.key, uploadedAt: new Date().toISOString() }, ...prev]);
-      await handleChooseCloudFile(up.key); // will download + parse + load scans
-      // Also refresh the list in background to catch others
-      await refreshCloudList();
-    } catch (e) {
-      setError(e.message || "Upload+Load failed");
-    } finally {
-      setCloudBusy(false);
-      const input = document.getElementById("hiddenUpload");
-      if (input) input.value = "";
-    }
-  };
+// ... earlier helpers (nfList, nfUpload, nfDownload, etc.)
 
-  const scansKeyFor = (fileKey) => {
-    const base = (fileKey || "").split("/").pop()?.replace(/\.[^.]+$/, "") || "file";
-    const prefix = (fileKey || "").split("/").slice(0, -1).join("/");
-    return `${prefix}/scans/${base}.json`;
-  };
+export default function InventoryScannerApp() {
+  // state hooks...
+  // refreshCloudList function...
+  
+ // Upload → add to list immediately → load → refresh from server
+const handleCloudUploadThenLoad = async (file) => {
+  if (!file) return;
+  setCloudBusy(true);
+  try {
+    const up = await nfUpload(namespace, file);
+    if (/\.csv$/i.test(up.key)) {
+      setCloudFiles((prev) => [
+        { key: up.key, uploadedAt: new Date().toISOString() },
+        ...prev,
+      ]);
+    }
+    await handleChooseCloudFile(up.key); // download & parse CSV, then load scans
+    await refreshCloudList();            // fetch latest from server
+  } catch (e) {
+    setError(e.message || "Upload+Load failed");
+  } finally {
+    setCloudBusy(false);
+    const input = document.getElementById("hiddenUpload");
+    if (input) input.value = "";
+  }
+};
+
+// SINGLE definition of scansKeyFor
+const scansKeyFor = (fileKey) => {
+  const base = (fileKey || "").split("/").pop()?.replace(/\.[^.]+$/, "") || "file";
+  const prefix = (fileKey || "").split("/").slice(0, -1).join("/");
+  return `${prefix}/scans/${base}.json`;
+};
 
   const loadCSVFromCloud = async (key) => {
     setCloudBusy(true);
