@@ -86,13 +86,16 @@ function bufferToBase64(arrayBuffer) {
 async function nfUpload(ns, file) {
   const url = `/.netlify/functions/blob-upload?ns=${encodeURIComponent(ns)}&name=${encodeURIComponent(file.name)}`;
   const buf = await file.arrayBuffer();
-  const b64 = bufferToBase64(buf); // safe for large files
+  const b64 = bufferToBase64(buf); // keep the chunked encoder you already added
   const res = await fetch(url, {
     method: "POST",
     body: b64,
     headers: { "content-type": "application/octet-stream" },
   });
-  if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+  if (!res.ok) {
+    const msg = await res.text().catch(() => "");
+    throw new Error(`Upload failed: ${res.status}${msg ? ` – ${msg}` : ""}`);
+  }
   return res.json();
 }
 
