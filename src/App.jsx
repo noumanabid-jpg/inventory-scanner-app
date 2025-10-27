@@ -34,13 +34,29 @@ const toNumber = (v) => {
   return Number.isFinite(n) ? n : 0;
 };
 
+// If the downloaded text is actually base64, decode it.
+function decodeMaybeBase64(s) {
+  if (!s) return s;
+  const t = String(s).trim();
+  // allow only plausible base64 charset to avoid false positives
+  if (!/^[A-Za-z0-9+/=\r\n]+$/.test(t)) return s;
+  try {
+    const decoded = atob(t.replace(/\s+/g, ""));
+    // sanity check: decoded looks like CSV (has a delimiter)
+    if (/[,;\t|]/.test(decoded)) return decoded;
+    return s;
+  } catch {
+    return s;
+  }
+}
+
 // Try multiple CSV parsing strategies until we get rows
 function parseCSVSmart(text) {
   if (!text || !text.trim()) {
     return { rows: [], headers: [], reason: "CSV text is empty" };
   }
 
-  const sanitize = (s) => s?.replace(/\uFEFF/g, ""); // strip BOM
+  const sanitize = (x) => x?.replace(/\uFEFF/g, ""); // strip BOM
 
   const strategies = [
     { name: "auto", opts: { header: true, skipEmptyLines: "greedy", delimitersToGuess: [",", "\t", ";", "|"] } },
@@ -209,16 +225,16 @@ async function nfUpload(ns, file) {
   return res.json();
 }
 
-// NOTE: your Netlify function `blob-download.mjs` must return *plain text*.
-// (We then wrap it as a Blob locally to feed Papa.parse.)
+// NOTE: your Netlify function `blob-download.mjs` may return plain text or (mis)base64.
+// We’ll read text then auto-decode if needed.
 async function nfDownload(key) {
   const res = await fetch(`/.netlify/functions/blob-download?key=${encodeURIComponent(key)}`);
   if (!res.ok) {
     const msg = await res.text().catch(() => "");
     throw new Error(`Download failed: ${res.status}${msg ? ` – ${msg}` : ""}`);
   }
-  const text = await res.text(); // CSV as text
-  return new Blob([text], { type: "text/csv; charset=utf-8" });
+  const text = await res.text(); // may be CSV or base64
+  return new Blob([text], { type: "text/plain; charset=utf-8" });
 }
 
 async function nfPutJSON(key, data) {
@@ -330,12 +346,13 @@ export default function InventoryScannerApp() {
     return `${prefix}/scans/${base}.json`;
   };
 
-  // Robust CSV parsing with multiple strategies
+  // Robust CSV parsing with base64 auto-decode + multiple strategies
   const loadCSVFromCloud = async (key) => {
     setCloudBusy(true);
     try {
       const blob = await nfDownload(key);
-      const text = await blob.text();
+      const raw = await blob.text();          // may be CSV or base64 string
+      const text = decodeMaybeBase64(raw);    // auto-decode if needed
 
       const result = parseCSVSmart(text);
 
