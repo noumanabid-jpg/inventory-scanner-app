@@ -34,15 +34,13 @@ const toNumber = (v) => {
   return Number.isFinite(n) ? n : 0;
 };
 
-// If the downloaded text is actually base64, decode it.
+// If downloaded text is base64, decode it.
 function decodeMaybeBase64(s) {
   if (!s) return s;
   const t = String(s).trim();
-  // allow only plausible base64 charset to avoid false positives
   if (!/^[A-Za-z0-9+/=\r\n]+$/.test(t)) return s;
   try {
     const decoded = atob(t.replace(/\s+/g, ""));
-    // sanity check: decoded looks like CSV (has a delimiter)
     if (/[,;\t|]/.test(decoded)) return decoded;
     return s;
   } catch {
@@ -52,9 +50,7 @@ function decodeMaybeBase64(s) {
 
 // Try multiple CSV parsing strategies until we get rows
 function parseCSVSmart(text) {
-  if (!text || !text.trim()) {
-    return { rows: [], headers: [], reason: "CSV text is empty" };
-  }
+  if (!text || !text.trim()) return { rows: [], headers: [], reason: "CSV text is empty" };
 
   const sanitize = (x) => x?.replace(/\uFEFF/g, ""); // strip BOM
 
@@ -88,10 +84,28 @@ function parseCSVSmart(text) {
   return { rows: [], headers: [], reason: `No rows parsed. First line: "${firstLine}"` };
 }
 
+// Normalize a barcode/string for matching
+function normCode(v) {
+  let s = String(v ?? "");
+  s = s.replace(/\uFEFF/g, ""); // strip BOM
+  s = s.trim();
+  s = s.replace(/\s+/g, ""); // remove internal spaces
+  s = s.replace(/[^\w-]/g, ""); // keep letters/numbers/_/-
+  return s;
+}
+
+// For numeric codes, also return a variant without leading zeros
+function normVariants(v) {
+  const a = normCode(v);
+  if (/^\d+$/.test(a)) {
+    const b = a.replace(/^0+/, "");
+    return b && b !== a ? [a, b] : [a];
+  }
+  return [a];
+}
+
 function mapColumns(headers) {
   const raw = Array.isArray(headers) ? headers : [];
-
-  // normalize: lowercase, strip BOM, remove spaces/underscores/dashes/slashes & parentheses
   const norm = (s) =>
     String(s ?? "")
       .toLowerCase()
@@ -103,33 +117,8 @@ function mapColumns(headers) {
   const find = (aliases) => raw.find((h) => aliases.map(norm).includes(norm(h)));
 
   const cols = {
-    // barcode-like
-    barcode: find([
-      "barcode",
-      "bar code",
-      "sku",
-      "itemcode",
-      "itemid",
-      "productcode",
-      "upc",
-      "ean",
-      "gtin",
-      "code",
-    ]),
-
-    // display/name-like
-    name: find([
-      "name",
-      "productname",
-      "title",
-      "item",
-      "itemname",
-      "description",
-      "product",
-      "producttitle",
-    ]),
-
-    // on-hand quantity (support many variants including your file)
+    barcode: find(["barcode", "bar code", "sku", "itemcode", "itemid", "productcode", "upc", "ean", "gtin", "code"]),
+    name: find(["name", "productname", "title", "item", "itemname", "description", "product", "producttitle"]),
     onHand: find([
       "onhand",
       "on hand",
@@ -148,8 +137,6 @@ function mapColumns(headers) {
       "available(noteditable)",
       "onhand(new)",
     ]),
-
-    // optional
     reserved: find([
       "reserved",
       "allocated",
@@ -184,7 +171,6 @@ async function nfList(ns) {
     throw new Error(`List failed: ${res.status}${msg ? ` – ${msg}` : ""}`);
   }
   const out = await res.json();
-  // normalize + client guard to .csv
   const files = (out.files || [])
     .map((f) => ({
       key: f.key || f.name || f.id,
@@ -208,16 +194,10 @@ function bufferToBase64(arrayBuffer) {
 }
 
 async function nfUpload(ns, file) {
-  const url = `/.netlify/functions/blob-upload?ns=${encodeURIComponent(ns)}&name=${encodeURIComponent(
-    file.name
-  )}`;
+  const url = `/.netlify/functions/blob-upload?ns=${encodeURIComponent(ns)}&name=${encodeURIComponent(file.name)}`;
   const buf = await file.arrayBuffer();
   const b64 = bufferToBase64(buf);
-  const res = await fetch(url, {
-    method: "POST",
-    body: b64,
-    headers: { "content-type": "application/octet-stream" },
-  });
+  const res = await fetch(url, { method: "POST", body: b64, headers: { "content-type": "application/octet-stream" } });
   if (!res.ok) {
     const msg = await res.text().catch(() => "");
     throw new Error(`Upload failed: ${res.status}${msg ? ` – ${msg}` : ""}`);
@@ -225,15 +205,14 @@ async function nfUpload(ns, file) {
   return res.json();
 }
 
-// NOTE: your Netlify function `blob-download.mjs` may return plain text or (mis)base64.
-// We’ll read text then auto-decode if needed.
+// Server may return plain CSV text or base64 string → we handle both.
 async function nfDownload(key) {
   const res = await fetch(`/.netlify/functions/blob-download?key=${encodeURIComponent(key)}`);
   if (!res.ok) {
     const msg = await res.text().catch(() => "");
     throw new Error(`Download failed: ${res.status}${msg ? ` – ${msg}` : ""}`);
   }
-  const text = await res.text(); // may be CSV or base64
+  const text = await res.text();
   return new Blob([text], { type: "text/plain; charset=utf-8" });
 }
 
@@ -270,13 +249,15 @@ export default function InventoryScannerApp() {
   const [error, setError] = useState("");
   const cols = useColumns(rows);
 
-  // Fast lookup by Barcode
+  // Fast lookup by Barcode (with variants)
   const index = useMemo(() => {
     if (!cols) return new Map();
     const m = new Map();
     for (const r of rows) {
-      const k = String(r[cols.barcode] ?? "").trim();
-      if (k) m.set(k, r);
+      const raw = r[cols.barcode];
+      for (const key of normVariants(raw)) {
+        if (key) m.set(key, r);
+      }
     }
     return m;
   }, [rows, cols]);
@@ -288,8 +269,6 @@ export default function InventoryScannerApp() {
   const [notFound, setNotFound] = useState("");
   const [saving, setSaving] = useState(false);
   const barcodeRef = useRef(null);
-
-  // Tracks last successfully-saved payload to avoid redundant saves
   const lastSavedRef = useRef("");
 
   useEffect(() => {
@@ -316,19 +295,16 @@ export default function InventoryScannerApp() {
     }
   };
 
-  // Upload → insert into list immediately → load → refresh from server
+  // Upload → insert into list immediately → load → refresh
   const handleCloudUploadThenLoad = async (file) => {
     if (!file) return;
     setCloudBusy(true);
     try {
       const up = await nfUpload(namespace, file);
       if (/\.csv$/i.test(up.key)) {
-        setCloudFiles((prev) => [
-          { key: up.key, uploadedAt: new Date().toISOString() },
-          ...prev,
-        ]);
+        setCloudFiles((prev) => [{ key: up.key, uploadedAt: new Date().toISOString() }, ...prev]);
       }
-      await handleChooseCloudFile(up.key); // download & parse CSV, then load scans
+      await handleChooseCloudFile(up.key);
       await refreshCloudList();
     } catch (e) {
       setError(e.message || "Upload+Load failed");
@@ -351,7 +327,7 @@ export default function InventoryScannerApp() {
     setCloudBusy(true);
     try {
       const blob = await nfDownload(key);
-      const raw = await blob.text();          // may be CSV or base64 string
+      const raw = await blob.text();          // may be CSV or base64
       const text = decodeMaybeBase64(raw);    // auto-decode if needed
 
       const result = parseCSVSmart(text);
@@ -368,10 +344,10 @@ export default function InventoryScannerApp() {
 
       setRows(result.rows);
       setFileName(key.split("/").pop());
-      setDiffs([]); // will be replaced by saved scans load
+      setDiffs([]); // replaced by saved scans load
       setNotFound("");
       setError("");
-      console.log("CSV parsed via strategy:", result.strategy, "Headers:", result.headers);
+      // console.log("CSV parsed via strategy:", result.strategy, "Headers:", result.headers);
     } catch (e) {
       setError(e.message || "Load failed");
     } finally {
@@ -406,12 +382,11 @@ export default function InventoryScannerApp() {
     barcodeRef.current?.focus();
   };
 
-  /* Debounced auto-save of scans (skip unchanged) */
+  // Debounced auto-save of scans
   useEffect(() => {
     if (!activeKey) return;
-
     const payload = JSON.stringify({ diffs });
-    if (payload === lastSavedRef.current) return; // unchanged
+    if (payload === lastSavedRef.current) return;
 
     let cancelled = false;
     const timer = setTimeout(async () => {
@@ -433,20 +408,26 @@ export default function InventoryScannerApp() {
     };
   }, [activeKey, diffs]);
 
-  /* Scanning & actions */
+  // Scanning & actions
   const onBarcodeScan = (e) => {
     if (e.key !== "Enter") return;
-    const code = e.currentTarget.value.trim();
-    if (!code) return;
+    const scanned = e.currentTarget.value;
+    const candidates = normVariants(scanned);
+    if (!candidates.length) return;
     if (!cols) {
       setError("Missing required columns: Barcode, Name, and On Hand.");
       return;
     }
 
-    const r = index.get(code);
+    let r = null;
+    for (const k of candidates) {
+      r = index.get(k);
+      if (r) break;
+    }
+
     if (!r) {
       setActive(null);
-      setNotFound(code);
+      setNotFound(candidates[0]);
       e.currentTarget.select();
       return;
     }
@@ -534,66 +515,63 @@ export default function InventoryScannerApp() {
     URL.revokeObjectURL(url);
   };
 
-  /* UI */
+  /* UI (mobile-first) */
   return (
-    <div className="min-h-screen w-full bg-gray-50 p-4 md:p-8">
-      <div className="mx-auto max-w-6xl space-y-6">
-        <header className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-          <div>
-            <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">
+    <div className="min-h-screen w-full bg-gray-50 p-3 sm:p-4 md:p-8">
+      <div className="mx-auto max-w-6xl space-y-4 sm:space-y-6">
+        {/* Header */}
+        <header className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 sm:gap-4">
+          <div className="space-y-1">
+            <h1 className="text-xl sm:text-2xl md:text-3xl font-semibold tracking-tight">
               Inventory Barcode Scanner
             </h1>
-            <p className="text-sm text-gray-600">
-              Choose a <strong>cloud CSV</strong>, scan the <strong>Barcode</strong>, confirm or adjust
-              quantities, and export a difference report.
+            <p className="text-xs sm:text-sm text-gray-600">
+              Load a <strong>cloud CSV</strong>, scan <strong>barcodes</strong>, adjust quantities, and export results.
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            {saving && <span className="text-xs text-gray-500 mr-2">Saving…</span>}
+          <div className="flex flex-wrap gap-2">
+            {saving && <span className="text-xs text-gray-500 self-center">Saving…</span>}
             <Button variant="outline" onClick={clearAll} className="gap-2">
               <RefreshCw className="h-4 w-4" /> Reset
             </Button>
             <Button onClick={exportDifferencesCSV} className="gap-2" disabled={!diffs.length}>
               <Download className="h-4 w-4" /> Diff CSV
             </Button>
-            <Button
-              variant="secondary"
-              onClick={exportAllScansCSV}
-              className="gap-2"
-              disabled={!diffs.length}
-            >
+            <Button variant="secondary" onClick={exportAllScansCSV} className="gap-2" disabled={!diffs.length}>
               <FileSpreadsheet className="h-4 w-4" /> All Scans
             </Button>
           </div>
         </header>
 
-        <section className="grid md:grid-cols-3 gap-6">
+        {/* Top controls */}
+        <section className="grid md:grid-cols-3 gap-4 sm:gap-6">
           <Card className="md:col-span-2">
             <CardHeader className="pb-2">
-              <CardTitle className="flex items-center gap-2">
+              <CardTitle className="flex items-center gap-2 text-base sm:text-lg">
                 <Upload className="h-5 w-5" /> Load Inventory CSV (Cloud)
               </CardTitle>
             </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid md:grid-cols-3 gap-3">
+            <CardContent className="space-y-3 sm:space-y-4">
+              <div className="grid gap-3 sm:gap-4 md:grid-cols-3">
                 <div className="space-y-2">
-                  <Label htmlFor="ns">Namespace</Label>
+                  <Label htmlFor="ns" className="text-xs sm:text-sm">Namespace</Label>
                   <Input
                     id="ns"
                     value={namespace}
                     onChange={(e) => setNamespace(e.target.value)}
                     placeholder="e.g., default or jeddah-warehouse"
                   />
-                  <div className="flex gap-2">
-                    <Button variant="outline" onClick={refreshCloudList} disabled={cloudBusy}>
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="outline" onClick={refreshCloudList} disabled={cloudBusy} className="flex-1 sm:flex-none">
                       Refresh
                     </Button>
                     <Button
                       variant="secondary"
                       onClick={() => document.getElementById("hiddenUpload").click()}
                       disabled={cloudBusy}
+                      className="flex-1 sm:flex-none"
                     >
-                      Upload to Cloud
+                      Upload
                     </Button>
                     <input
                       id="hiddenUpload"
@@ -604,27 +582,30 @@ export default function InventoryScannerApp() {
                     />
                   </div>
                 </div>
+
                 <div className="md:col-span-2 space-y-2">
-                  <Label>Select Cloud File</Label>
-                  <select
-                    className="w-full border rounded-xl p-2"
-                    value={activeKey || ""}
-                    onChange={(e) => handleChooseCloudFile(e.target.value)}
-                  >
-                    <option value="">Choose...</option>
-                    {cloudFiles.map((f) => (
-                      <option key={f.key} value={f.key}>
-                        {f.key.split("/").pop()}
-                        {f.uploadedAt ? ` — ${new Date(f.uploadedAt).toLocaleString()}` : ""}
-                      </option>
-                    ))}
-                  </select>
-                  {fileName && <Badge variant="secondary">{fileName}</Badge>}
+                  <Label className="text-xs sm:text-sm">Select Cloud File</Label>
+                  <div className="relative">
+                    <select
+                      className="w-full border rounded-xl p-2 pr-8 text-sm"
+                      value={activeKey || ""}
+                      onChange={(e) => handleChooseCloudFile(e.target.value)}
+                    >
+                      <option value="">Choose...</option>
+                      {cloudFiles.map((f) => (
+                        <option key={f.key} value={f.key}>
+                          {f.key.split("/").pop()}
+                          {f.uploadedAt ? ` — ${new Date(f.uploadedAt).toLocaleString()}` : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {fileName && <Badge variant="secondary" className="text-xs">{fileName}</Badge>}
                 </div>
               </div>
 
               {error && (
-                <div className="flex items-start gap-2 text-red-600 text-sm">
+                <div className="flex items-start gap-2 text-red-600 text-xs sm:text-sm">
                   <AlertTriangle className="h-4 w-4 mt-0.5" /> {error}
                 </div>
               )}
@@ -632,14 +613,15 @@ export default function InventoryScannerApp() {
               <Separator />
 
               <div className="grid gap-2">
-                <Label htmlFor="barcode">Scan Barcode</Label>
+                <Label htmlFor="barcode" className="text-xs sm:text-sm">Scan Barcode</Label>
                 <div className="flex gap-2">
                   <Input
                     id="barcode"
                     ref={barcodeRef}
                     placeholder="Focus here and scan barcode..."
                     onKeyDown={onBarcodeScan}
-                    disabled={!cols} // enable once required columns are detected
+                    disabled={!cols}
+                    className="flex-1"
                   />
                   <Button
                     variant="outline"
@@ -655,12 +637,7 @@ export default function InventoryScannerApp() {
                   <p className="text-xs text-gray-600">
                     Loaded <strong>{rows.length}</strong> rows.&nbsp;
                     {cols ? (
-                      <>
-                        Detected: <strong>Barcode</strong>, <strong>Name</strong>,{" "}
-                        <strong>On Hand</strong>
-                        {cols.reserved ? ", " : ""}
-                        {cols.reserved ? <strong>Reserved</strong> : null}.
-                      </>
+                      <>Detected: <strong>Barcode</strong>, <strong>Name</strong>, <strong>On Hand</strong>{cols.reserved ? ", " : ""}{cols.reserved ? <strong>Reserved</strong> : null}.</>
                     ) : (
                       <>Couldn’t find required headers in the CSV.</>
                     )}
@@ -676,67 +653,46 @@ export default function InventoryScannerApp() {
             </CardContent>
           </Card>
 
+          {/* Progress card */}
           <Card>
-            <CardHeader className="pb-2">
-              <CardTitle>Progress</CardTitle>
-            </CardHeader>
+            <CardHeader className="pb-2"><CardTitle className="text-base sm:text-lg">Progress</CardTitle></CardHeader>
             <CardContent className="space-y-2 text-sm">
-              <div className="flex items-center justify-between">
-                <span>Total items</span>
-                <span className="font-medium">{rows.length}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span>Scanned (unique)</span>
-                <span className="font-medium">
-                  {new Set(diffs.map((d) => d.barcode)).size}
-                </span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span>With differences</span>
-                <span className="font-medium">{diffs.filter((d) => d.delta !== 0).length}</span>
-              </div>
+              <div className="flex items-center justify-between"><span>Total items</span><span className="font-medium">{rows.length}</span></div>
+              <div className="flex items-center justify-between"><span>Scanned (unique)</span><span className="font-medium">{new Set(diffs.map((d) => d.barcode)).size}</span></div>
+              <div className="flex items-center justify-between"><span>With differences</span><span className="font-medium">{diffs.filter((d) => d.delta !== 0).length}</span></div>
             </CardContent>
           </Card>
         </section>
 
-        <section className="grid gap-4">
-          <h2 className="text-lg font-semibold">Recent Scans</h2>
+        {/* Recent scans table */}
+        <section className="grid gap-3 sm:gap-4">
+          <h2 className="text-base sm:text-lg font-semibold">Recent Scans</h2>
           <div className="overflow-x-auto rounded-xl border bg-white">
-            <table className="min-w-full text-sm">
+            <table className="min-w-full text-xs sm:text-sm">
               <thead className="bg-gray-50">
                 <tr className="text-left">
-                  <th className="px-3 py-2">Time</th>
-                  <th className="px-3 py-2">Barcode</th>
-                  <th className="px-3 py-2">Name</th>
-                  <th className="px-3 py-2 text-right">Prev On Hand</th>
-                  <th className="px-3 py-2 text-right">Actual</th>
-                  <th className="px-3 py-2 text-right">Delta</th>
+                  <th className="px-2 sm:px-3 py-2">Time</th>
+                  <th className="px-2 sm:px-3 py-2">Barcode</th>
+                  <th className="px-2 sm:px-3 py-2">Name</th>
+                  <th className="px-2 sm:px-3 py-2 text-right">Prev On Hand</th>
+                  <th className="px-2 sm:px-3 py-2 text-right">Actual</th>
+                  <th className="px-2 sm:px-3 py-2 text-right">Delta</th>
                 </tr>
               </thead>
               <tbody>
                 {diffs.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="px-3 py-6 text-center text-gray-500">
-                      No scans yet.
-                    </td>
+                    <td colSpan={6} className="px-2 sm:px-3 py-6 text-center text-gray-500">No scans yet.</td>
                   </tr>
                 )}
                 {diffs.map((d) => (
                   <tr key={d.barcode} className="border-t">
-                    <td className="px-3 py-2">{new Date(d.ts).toLocaleString()}</td>
-                    <td className="px-3 py-2 font-mono">{d.barcode}</td>
-                    <td className="px-3 py-2">{d.name}</td>
-                    <td className="px-3 py-2 text-right">{d.prevOnHand}</td>
-                    <td className="px-3 py-2 text-right">{d.actual}</td>
-                    <td
-                      className={`px-3 py-2 text-right ${
-                        d.delta === 0
-                          ? "text-gray-600"
-                          : d.delta > 0
-                          ? "text-emerald-600"
-                          : "text-rose-600"
-                      }`}
-                    >
+                    <td className="px-2 sm:px-3 py-2 whitespace-nowrap">{new Date(d.ts).toLocaleString()}</td>
+                    <td className="px-2 sm:px-3 py-2 font-mono break-all">{d.barcode}</td>
+                    <td className="px-2 sm:px-3 py-2">{d.name}</td>
+                    <td className="px-2 sm:px-3 py-2 text-right">{d.prevOnHand}</td>
+                    <td className="px-2 sm:px-3 py-2 text-right">{d.actual}</td>
+                    <td className={`px-2 sm:px-3 py-2 text-right ${d.delta === 0 ? "text-gray-600" : d.delta > 0 ? "text-emerald-600" : "text-rose-600"}`}>
                       {d.delta > 0 ? `+${d.delta}` : d.delta}
                     </td>
                   </tr>
@@ -747,26 +703,38 @@ export default function InventoryScannerApp() {
         </section>
       </div>
 
+      {/* Mobile bottom bar for quick actions (shows after a file is loaded) */}
+      {rows.length > 0 && (
+        <div className="fixed bottom-3 inset-x-3 md:hidden">
+          <div className="rounded-2xl shadow-lg border bg-white p-3 flex gap-2">
+            <Button className="flex-1" onClick={exportDifferencesCSV} disabled={!diffs.length}>
+              Diff CSV
+            </Button>
+            <Button variant="secondary" className="flex-1" onClick={exportAllScansCSV} disabled={!diffs.length}>
+              All Scans
+            </Button>
+          </div>
+        </div>
+      )}
+
       {/* Modal to confirm actual qty */}
       <Dialog open={!!active} onOpenChange={(open) => !open && setActive(null)}>
         <DialogContent className="sm:max-w-lg">
           {active && (
             <div className="space-y-4">
               <DialogHeader>
-                <DialogTitle className="text-2xl">{active.name}</DialogTitle>
+                <DialogTitle className="text-xl sm:text-2xl">{active.name}</DialogTitle>
                 <DialogDescription>
-                  <div className="text-base">
-                    Barcode: <span className="font-mono font-medium">{active.barcode}</span>
+                  <div className="text-sm sm:text-base">
+                    Barcode: <span className="font-mono font-medium break-all">{active.barcode}</span>
                   </div>
                 </DialogDescription>
               </DialogHeader>
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                 <StatBox label="On Hand" value={active.onHand} large />
                 <StatBox label="Reserved" value={active.reserved} muted />
-                <div className="col-span-3">
-                  <Label htmlFor="actual" className="text-sm">
-                    Actual On Hand
-                  </Label>
+                <div className="col-span-2 sm:col-span-3">
+                  <Label htmlFor="actual" className="text-xs sm:text-sm">Actual On Hand</Label>
                   <Input
                     id="actual"
                     type="number"
@@ -777,26 +745,22 @@ export default function InventoryScannerApp() {
                       if (e.key === "Enter") confirmQty(actualQty);
                       if (e.key === "Escape") setActive(null);
                     }}
-                    className="text-lg"
+                    className="text-base sm:text-lg"
                   />
                   <p className="text-xs text-gray-500 mt-1">
                     Press <strong>Enter</strong> to save, <strong>Esc</strong> to cancel.
                   </p>
                 </div>
               </div>
-              <DialogFooter className="flex items-center justify-between gap-2">
-                <Button variant="outline" className="gap-2" onClick={() => setActive(null)}>
+              <DialogFooter className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <Button variant="outline" className="gap-2 w-full sm:w-auto" onClick={() => setActive(null)}>
                   <X className="h-4 w-4" /> Cancel
                 </Button>
-                <div className="flex gap-2">
-                  <Button
-                    variant="secondary"
-                    className="gap-2"
-                    onClick={() => confirmQty(active.onHand)}
-                  >
-                    <Check className="h-4 w-4" /> Confirm current ({active.onHand})
+                <div className="flex gap-2 w-full sm:w-auto">
+                  <Button variant="secondary" className="gap-2 flex-1 sm:flex-none" onClick={() => confirmQty(active.onHand)}>
+                    <Check className="h-4 w-4" /> Confirm {active.onHand}
                   </Button>
-                  <Button className="gap-2" onClick={() => confirmQty(actualQty)}>
+                  <Button className="gap-2 flex-1 sm:flex-none" onClick={() => confirmQty(actualQty)}>
                     <Check className="h-4 w-4" /> Save Actual
                   </Button>
                 </div>
@@ -814,8 +778,8 @@ function StatBox({ label, value, large, muted }) {
   return (
     <Card className={`border-2 ${muted ? "border-gray-200" : "border-gray-300"}`}>
       <CardContent className="p-4">
-        <div className="text-xs uppercase tracking-wide text-gray-500">{label}</div>
-        <div className={`${large ? "text-3xl" : "text-xl"} font-semibold`}>{value}</div>
+        <div className="text-[10px] sm:text-xs uppercase tracking-wide text-gray-500">{label}</div>
+        <div className={`${large ? "text-2xl sm:text-3xl" : "text-lg sm:text-xl"} font-semibold`}>{value}</div>
       </CardContent>
     </Card>
   );
