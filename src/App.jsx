@@ -315,12 +315,14 @@ export default function InventoryScannerApp() {
     }
   };
 
-  // JSON location for scans alongside the selected CSV
-  const scansKeyFor = (fileKey) => {
-    const base = (fileKey || "").split("/").pop()?.replace(/\.[^.]+$/, "") || "file";
-    const prefix = (fileKey || "").split("/").slice(0, -1).join("/");
-    return `${prefix}/scans/${base}.json`;
-  };
+// JSON location for scans alongside the selected CSV
+const scansKeyFor = (fileKey) => {
+  const parts = String(fileKey || "").split("/");
+  const base = (parts.pop() || "file").replace(/\.[^.]+$/, ""); // filename without extension
+  const prefix = parts.join("/"); // may be ""
+  // ✅ no accidental leading slash when there is no prefix
+  return `${prefix ? prefix + "/" : ""}scans/${base}.json`;
+};
 
   // Robust CSV parsing with base64 auto-decode + multiple strategies
   const loadCSVFromCloud = async (key) => {
@@ -355,25 +357,44 @@ export default function InventoryScannerApp() {
     }
   };
 
-  const loadScansForActive = async (fileKey) => {
+const loadScansForActive = async (fileKey) => {
+  // canonical
+  const primary = scansKeyFor(fileKey);
+
+  // fallbacks for older saves you might have:
+  // - at repo root: "scans/<base>.json" (when there was no namespace/prefix)
+  // - under explicit namespace folder (if a function used namespace directly)
+  const parts = String(fileKey || "").split("/");
+  const filename = (parts.pop() || "file");
+  const base = filename.replace(/\.[^.]+$/, "");
+  const namespaceFolder = parts[0] || ""; // e.g. "default"
+  const fallbackRoot = `scans/${base}.json`;
+  const fallbackNs = namespaceFolder ? `${namespaceFolder}/scans/${base}.json` : fallbackRoot;
+
+  const candidates = Array.from(new Set([primary, fallbackNs, fallbackRoot]));
+
+  // try in order until one works
+  for (const key of candidates) {
     try {
-      const key = scansKeyFor(fileKey);
       const res = await nfGetJSON(key);
       if (res && Array.isArray(res.diffs)) {
         setDiffs(res.diffs);
         lastSavedRef.current = JSON.stringify({ diffs: res.diffs });
+        return;
       } else if (res && res.data && Array.isArray(res.data.diffs)) {
         setDiffs(res.data.diffs);
         lastSavedRef.current = JSON.stringify({ diffs: res.data.diffs });
-      } else {
-        setDiffs([]);
-        lastSavedRef.current = JSON.stringify({ diffs: [] });
+        return;
       }
     } catch {
-      setDiffs([]);
-      lastSavedRef.current = JSON.stringify({ diffs: [] });
+      // keep trying next candidate
     }
-  };
+  }
+
+  // nothing found — start fresh
+  setDiffs([]);
+  lastSavedRef.current = JSON.stringify({ diffs: [] });
+};
 
   const handleChooseCloudFile = async (key) => {
     setActiveKey(key);
