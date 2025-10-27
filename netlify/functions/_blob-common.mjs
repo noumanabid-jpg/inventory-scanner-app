@@ -1,23 +1,42 @@
-import { getInventoryStore, json, bad } from "./_blob-common.mjs";
+// netlify/functions/_blob-common.mjs
+import { getStore } from "@netlify/blobs";
 
-export async function handler(event) {
-  if (event.httpMethod !== "GET") return bad("Use GET", 405);
-  const ns = event.queryStringParameters?.ns || "default";
+const STORE = "inventory";
 
-  try {
-    const store = getInventoryStore();
-    // drop trailing slash to catch all prefixes
-    const out = await store.list({ prefix: ns });
-    const files = out?.objects || out?.blobs || [];
+/**
+ * Uses platform credentials by default.
+ * If you set NETLIFY_SITE_ID + NETLIFY_ACCESS_TOKEN, it will use manual mode too.
+ */
+export function getInventoryStore() {
+  const opts = { name: STORE };
 
-    const normalized = files.map(f => ({
-      key: f.key || f.name || f.id,
-      size: f.size ?? f.bytes ?? null,
-      uploadedAt: f.uploadedAt || f.uploaded_at || null,
-    })).filter(f => f.key);
+  const siteID =
+    process.env.NETLIFY_SITE_ID || process.env.SITE_ID || "";
+  const token =
+    process.env.NETLIFY_ACCESS_TOKEN ||
+    process.env.NETLIFY_API_TOKEN ||
+    process.env.TOKEN ||
+    "";
 
-    return json({ ok: true, ns, files: normalized });
-  } catch (e) {
-    return bad(`List error: ${e?.message || e}`, 500);
+  if (siteID && token) {
+    opts.siteID = siteID;
+    opts.token = token;
   }
+
+  return getStore(opts);
+}
+
+export function json(res, status = 200) {
+  return {
+    statusCode: status,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(res),
+  };
+}
+
+export function bad(res, status = 400) {
+  return json(
+    { error: typeof res === "string" ? res : "Bad Request", detail: res },
+    status
+  );
 }
