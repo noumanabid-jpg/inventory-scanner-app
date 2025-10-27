@@ -1,41 +1,23 @@
-import { getStore } from "@netlify/blobs";
+import { getInventoryStore, json, bad } from "./_blob-common.mjs";
 
-const STORE = "inventory";
+export async function handler(event) {
+  if (event.httpMethod !== "GET") return bad("Use GET", 405);
+  const ns = event.queryStringParameters?.ns || "default";
 
-/**
- * Uses Netlify platform credentials by default.
- * If NETLIFY_SITE_ID + NETLIFY_ACCESS_TOKEN are present, switches to manual mode.
- */
-export function getInventoryStore() {
-  const opts = { name: STORE };
+  try {
+    const store = getInventoryStore();
+    // drop trailing slash to catch all prefixes
+    const out = await store.list({ prefix: ns });
+    const files = out?.objects || out?.blobs || [];
 
-  const siteID =
-    process.env.NETLIFY_SITE_ID || process.env.SITE_ID || "";
-  const token =
-    process.env.NETLIFY_ACCESS_TOKEN ||
-    process.env.NETLIFY_API_TOKEN ||
-    process.env.TOKEN ||
-    "";
+    const normalized = files.map(f => ({
+      key: f.key || f.name || f.id,
+      size: f.size ?? f.bytes ?? null,
+      uploadedAt: f.uploadedAt || f.uploaded_at || null,
+    })).filter(f => f.key);
 
-  if (siteID && token) {
-    opts.siteID = siteID;
-    opts.token = token;
+    return json({ ok: true, ns, files: normalized });
+  } catch (e) {
+    return bad(`List error: ${e?.message || e}`, 500);
   }
-
-  return getStore(opts);
-}
-
-export function json(res, status = 200) {
-  return {
-    statusCode: status,
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(res),
-  };
-}
-
-export function bad(res, status = 400) {
-  return json(
-    { error: typeof res === "string" ? res : "Bad Request", detail: res },
-    status
-  );
 }
