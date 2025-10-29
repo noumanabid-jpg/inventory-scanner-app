@@ -117,7 +117,7 @@ function mapColumns(headers) {
   const find = (aliases) => raw.find((h) => aliases.map(norm).includes(norm(h)));
 
   const cols = {
-    barcode: find(["barcode", "bar code", "sku", "itemcode", "itemid", "productcode", "upc", "ean", "gtin", "code"]),
+    barcode: find(["barcode", "bar code", "itemcode", "itemid", "productcode", "upc", "ean", "gtin", "code"]),
     name: find(["name", "productname", "title", "item", "itemname", "description", "product", "producttitle"]),
     onHand: find([
       "onhand",
