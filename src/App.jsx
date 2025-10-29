@@ -281,11 +281,12 @@ const scanKeyCandidates = (fileKey, namespace) => {
 
 export default function InventoryScannerApp() {
   // Cloud / files
-  const [namespace, setNamespace] = useState("default");
+  const [namespace, setNamespace] = useState("Jeddah");
   const [cloudFiles, setCloudFiles] = useState([]); // {key,size,uploadedAt}
   const [cloudBusy, setCloudBusy] = useState(false);
   const [activeKey, setActiveKey] = useState("");
-    useEffect(() => {
+
+  useEffect(() => {
     // whenever namespace changes (including first mount), fetch that bucket’s files
     refreshCloudList();
 
@@ -295,6 +296,8 @@ export default function InventoryScannerApp() {
     setDiffs([]);
     setFileName("");
   }, [namespace]);
+
+  // ... rest of your component
 
   // Data
   const [rows, setRows] = useState([]);
